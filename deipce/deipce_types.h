@@ -1,0 +1,515 @@
+/** @file
+ */
+
+/*
+
+   DE-IP Core Edge Linux driver
+
+   Copyright (C) 2013 Flexibilis Oy
+
+   This program is free software; you can redistribute it and/or modify it
+   under the terms of the GNU General Public License version 2
+   as published by the Free Software Foundation.
+
+   This program is distributed in the hope that it will be useful, but WITHOUT
+   ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+   FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
+   more details.
+
+   You should have received a copy of the GNU General Public License
+   along with this program.  If not, see <http://www.gnu.org/licenses/>.
+
+*/
+
+#ifndef DEIPCE_TYPES_H
+#define DEIPCE_TYPES_H
+
+#include <linux/if.h>
+#include <linux/netdevice.h>
+#include <linux/mutex.h>
+#include <linux/spinlock.h>
+#include <linux/workqueue.h>
+#include <linux/net_tstamp.h>
+#include <linux/debugfs.h>
+#include <linux/ethtool.h>
+
+#include "deipce_if.h"
+#include "deipce_hw_type.h"
+#include "deipce_switchdev.h"
+#include "deipce_preempt.h"
+
+/// Maximum number of FRS devices
+#define DEIPCE_MAX_DEVICES  8
+
+/// Modes supported by FRS
+#define DEIPCE_ETHTOOL_SUPPORTED \
+    (SUPPORTED_10baseT_Full | \
+     SUPPORTED_100baseT_Full | \
+     SUPPORTED_1000baseT_Full | \
+     SUPPORTED_Autoneg | \
+     SUPPORTED_TP | \
+     SUPPORTED_MII | \
+     SUPPORTED_FIBRE | \
+     SUPPORTED_Autoneg)
+
+struct deipce_drv_priv;
+struct deipce_dev_priv;
+struct deipce_port_priv;
+struct deipce_ibc_dev_priv;
+struct deipce_fsc_dev_priv;
+
+/**
+ * Recognized SFP types.
+ */
+enum deipce_sfp_type {
+    DEIPCE_SFP_NONE,           ///< None
+
+    // Fiber
+    DEIPCE_SFP_1000BASEX,      ///< 1000Base-X or any other 1000 Mb/s fiber
+    DEIPCE_SFP_100BASEFX,      ///< 100Base-FX or any other 100 Mb/s fiber
+
+    // Copper
+    DEIPCE_SFP_1000BASET,      ///< 1000Base-T
+    DEIPCE_SFP_100BASET,       ///< 100Base-T
+
+    DEIPCE_SFP_UNSUPPORTED,    ///< Unsupported or unrecognized SFP module
+};
+
+/**
+ * FRS statistics directly available from FRS counters.
+ * References to RMON refer to RMON statistics group etherStatsXxxx.
+ */
+enum {
+    // Available from FRS registers
+    FRS_CNT_RX_GOOD_OCTETS,
+    FRS_CNT_RX_BAD_OCTETS,
+    FRS_CNT_RX_UNICAST,         ///< RMON UnicastPkts
+    FRS_CNT_RX_BROADCAST,       ///< RMON BroadcastPkts
+    FRS_CNT_RX_MULTICAST,       ///< RMON MulticastPkts
+    FRS_CNT_RX_UNDERSIZE,       ///< RMON UndersizePkts
+    FRS_CNT_RX_FRAGMENT,        ///< RMON Fragments
+    FRS_CNT_RX_OVERSIZE,        ///< RMON OverSizePkts
+    FRS_CNT_RX_JABBER,          ///< RMON Jabbers
+    FRS_CNT_RX_ERR,
+    FRS_CNT_RX_CRC,             ///< RMON CRCAlignErrors
+    FRS_CNT_RX_64,              ///< RMON Pkts64Octets
+    FRS_CNT_RX_65_127,          ///< RMON Pkts65to127Octets
+    FRS_CNT_RX_128_255,         ///< RMON Pkts128to255Octets
+    FRS_CNT_RX_256_511,         ///< RMON Pkts256to511ctets
+    FRS_CNT_RX_512_1023,        ///< RMON Pkts512to1023ctets
+    FRS_CNT_RX_1024_1536,       ///< RMON Pkts1024to1536Octets
+    FRS_CNT_RX_HSRPRP,
+    FRS_CNT_RX_WRONGLAN,
+    FRS_CNT_RX_DUPLICATE,
+    FRS_CNT_RX_MEM_FULL_DROP,
+    FRS_CNT_RX_POLICED,
+    FRS_CNT_RX_MACSEC_UNTAGGED,
+    FRS_CNT_RX_MACSEC_NOTSUPP,
+    FRS_CNT_RX_MACSEC_UNKNOWN_SCI,
+    FRS_CNT_RX_MACSEC_NOTVALID,
+    FRS_CNT_RX_MACSEC_LATE,
+    FRS_CNT_RX_PREEMPT_SMD_ERR,
+    FRS_CNT_RX_PREEMPT_ASS_ERR,
+    FRS_CNT_RX_PREEMPT_ASS_OK,
+    FRS_CNT_RX_PREEMPT_FRAG,
+    FRS_CNT_TX_OCTETS,
+    FRS_CNT_TX_UNICAST,
+    FRS_CNT_TX_BROADCAST,
+    FRS_CNT_TX_MULTICAST,
+    FRS_CNT_TX_HSRPRP,
+    FRS_CNT_TX_PRIQ_DROP,
+    FRS_CNT_TX_EARLY_DROP,
+    FRS_CNT_TX_PREEMPT_FRAG,
+    FRS_CNT_TX_OVERRUN,
+
+    /// Number of statistics available from FRS counters
+    FRS_CNT_REG_COUNT,
+};
+
+/**
+ * Type for mapping statistics counters to name and register address.
+ */
+struct deipce_stat {
+    char name[ETH_GSTRING_LEN];         ///< counter name
+    uint32_t reg;                       ///< register address (number)
+};
+
+/**
+ * Table of counter names and addresses.
+ * Index is FRS_CNT_xxx
+ */
+extern const struct deipce_stat deipce_stat_info[FRS_CNT_REG_COUNT];
+
+/**
+ * FRS netdevice privates structure.
+ */
+struct deipce_netdev_priv {
+    struct deipce_dev_priv *dp;         ///< switch privates
+    struct deipce_port_priv *pp;        ///< switch port privates,
+                                        ///< or NULL for endpoint
+    uint32_t msg_enable;                ///< NETIF message level
+    struct net_device_stats stats;      ///< Statistics
+
+    // Rest are meaningful for switch ports only.
+    enum link_mode link_mode;           ///< Current link mode
+    enum link_mode force_link_mode;     ///< Forced link mode
+    struct mutex link_mode_lock;        ///< Synchronize changes
+                                        ///< Cannot use spinlock
+    unsigned int stp_state;             ///< port STP state, BR_STATE_xxx
+    struct deipce_switchdev_port switchdev;     ///< switchdev support
+};
+
+/**
+ * PHY device context.
+ */
+struct deipce_phy {
+    struct device_node *node;           ///< PHY device tree node
+    phy_interface_t interface;          ///< PHY interface mode to use
+    struct phy_device *phydev;          ///< PHY device itself
+    uint32_t orig_supported;            ///< supported PHY ETHTOOL features
+    /// PHY delays for each link mode
+    struct deipce_delay delay[DEIPCE_LINK_MODE_COUNT];
+};
+
+/**
+ * SFP module information.
+ */
+struct deipce_sfp {
+    struct device_node *eeprom_node;    ///< SFP EEPROM node
+    struct i2c_client *eeprom;          ///< SFP EEPROM I2C client
+    enum deipce_sfp_type type;          ///< SFP module type
+    uint32_t supported;                 ///< supported ETHTOOL features/speeds,
+                                        ///< set also when SFP not in use
+    struct deipce_phy phy;              ///< SFP PHY context
+};
+
+/**
+ * FRS port adapter operations.
+ */
+struct deipce_port_adapter_ops {
+    /**
+     * Function to setup adapter and PHY for detected SFP type.
+     */
+    void (*setup) (struct deipce_port_priv *port);
+
+    /**
+     * Function to check link status from adapter, or NULL.
+     * This is used when there is no PHY and adapter provides link status.
+     */
+    enum link_mode (*check_link) (struct deipce_port_priv *port);
+
+    /**
+     * Function to update link status to adapter, or NULL.
+     * This is used when adapter needs to be informed
+     * about link status changes.
+     */
+    void (*update_link) (struct deipce_port_priv *port);
+};
+
+/**
+ * FRS port adapter structure.
+ */
+struct deipce_port_adapter {
+    void __iomem *ioaddr;               ///< port adapter registers
+    uint32_t supported;                 ///< supported ETHTOOL features/speeds,
+                                        ///< set also when adapter is not
+                                        ///< recognized
+    uint8_t port;                       ///< current ETHTOOL port
+    struct deipce_port_adapter_ops ops; ///< port adapter operations
+};
+
+/**
+ * FRS frame timestamper context for detecting timestamps of sent frames.
+ */
+struct deipce_tx_stamper {
+    spinlock_t lock;                    ///< synchronize timestamper
+    unsigned int next;                  ///< next FRS timestamper index
+    unsigned int next_skb;              ///< next skb index
+    /// original sk_buff in progress
+    struct sk_buff *orig_skb[FRS_TS_NUMBER_TIMESTAMPS];
+};                                      ///< PTP RX frame timestamper
+
+/**
+ * FRS port private information structure.
+ */
+struct deipce_port_priv {
+    struct deipce_dev_priv *dp;         ///< back reference
+    uint8_t port_num;                   ///< port number
+    uint16_t trailer;                   ///< management trailer for sending
+
+    struct delayed_work check_link;     ///< check link state periodically
+    struct delayed_work capture_stats;  ///< capture statistics counters
+
+    void __iomem *ioaddr;               ///< port registers
+    enum deipce_medium_type medium_type; ///< medium type
+    uint32_t flags;                     ///< port flags
+    struct net_device *netdev;          ///< net_device for port
+
+    struct deipce_port_adapter adapter; ///< adapter handling state
+    struct deipce_phy ext_phy;          ///< external PHY device context
+    struct deipce_sfp sfp;              ///< SFP module information
+
+    struct mutex stats_lock;            ///< synchronize statistics access
+    uint64_t stats[FRS_CNT_REG_COUNT];  ///< statistics
+
+    struct mutex port_reg_lock;         ///< synchronize port register access
+
+    uint16_t mgmt_prio;                 ///< management traffic IPO priority
+    uint16_t rx_delay;                  ///< RX delay for PTP messages
+    uint16_t tx_delay;                  ///< TX delay for PTP messages
+    uint32_t p2p_delay;                 ///< P2P delay
+    struct deipce_delay cur_delay;      ///< current total delays
+    struct deipce_tx_stamper tx_stamper;       ///< PTP TX frame timestamper
+    unsigned int rx_stamper;            ///< PTP RX frame timestamper index
+
+    struct deipce_switchdev_port switchdev;     ///< switchdev support
+    struct deipce_preempt preempt;      ///< preemption state
+    struct {
+        struct deipce_fsc_dev_priv *fsc;        ///< FSC instance
+        unsigned int num;               ///< scheduler number
+    } sched;                            ///< associated scheduler info
+    struct {
+        spinlock_t lock;                ///< synchronize access
+        uint64_t bitrate[DEIPCE_MAX_PRIO_QUEUES];       ///< rate in bps
+    } shaper;
+
+#ifdef CONFIG_DEBUG_FS
+    struct dentry *debugfs_dir;         ///< debugfs port directory
+#endif
+};
+
+/**
+ * Device statistics. Other that netdev stats.
+ */
+struct deipce_stats {
+    uint32_t rx_stamp;          ///< PTP timestamper RX event
+    uint32_t tx_stamp;          ///< PTP timestamper TX event
+    uint32_t rx_error;          ///< RX error event
+    uint32_t congested;         ///< Congested event
+    uint32_t tx_stamp_lost;     ///< PTP TX timestamps lost
+};
+
+/**
+ * SMAC table row selection algorithms.
+ */
+enum frs_smac_row_sel {
+    FLX_FRS_SMAC_ROW_SEL_NO_VLAN,       ///< XOR with VLAN ID disabled
+    FLX_FRS_SMAC_ROW_SEL_VLAN,          ///< XOR with VLAN ID enabled
+};
+
+/**
+ * SMAC table configuration.
+ */
+struct frs_smac_table_config {
+    /// row selection algorithm for each column
+    enum frs_smac_row_sel row_sel[FRS_SMAC_TABLE_COLS];
+};
+
+/**
+ * FRS static MAC address table entry.
+ */
+struct frs_smac_table_entry {
+    uint8_t mac_address[ETH_ALEN];      ///< MAC address
+    uint16_t column;                    ///< static MAC address table column
+    uint16_t config;                    ///< static MAC config register
+                                        ///< (SMAC_TABLE0)
+    uint16_t fwd_mask;                  ///< forward port mask
+    uint16_t policed_mask;              ///< policed port mask
+    uint16_t policer;                   ///< policer number
+    uint16_t vlan;                      ///< VLAN number
+};
+
+// FES feature flags
+#define FLX_FRS_FEAT_GIGABIT    BIT(0)  ///< gigabit speed
+#define FLX_FRS_FEAT_STATS      BIT(1)  ///< statistics counters
+#define FLX_FRS_FEAT_VLAN       BIT(2)  ///< VLAN support
+#define FLX_FRS_FEAT_MAC_TABLE  BIT(3)  ///< MAC address table
+#define FLX_FRS_FEAT_SHAPER     BIT(4)  ///< traffic shaper
+
+/**
+ * FES features.
+ */
+struct deipce_features {
+    uint32_t flags;             ///< feature flags
+    uint32_t clock_freq;        ///< clock frequency in Hz
+    uint16_t smac_rows;         ///< number of static MAC address table rows
+    uint16_t policers;          ///< number of policers
+    uint16_t prio_queues;       ///< number of priority queues
+    uint16_t hsr_ports;         ///< bitmask of HSR-capable ports
+    uint16_t prp_ports;         ///< bitmask of PRP-capable ports
+    uint16_t macsec_ports;      ///< bitmask of MACsec-capable ports
+    uint16_t sched_ports;       ///< bitmask of scheduled ports
+    uint16_t ts_ports;          ///< bitmask of ports with time stamper,
+                                ///< zero means port 0 only
+    uint16_t ct_ports;          ///< bitmask of ports with cut-through support
+    uint16_t preempt_ports;     ///< bitmask of ports with preemption support
+};
+
+/**
+ * FRS device private information structure.
+ */
+struct deipce_dev_priv {
+    struct device *this_dev;            ///< pointer to (platform) device
+    unsigned int dev_num;               ///< number of this device
+    unsigned int irq;                   ///< IRQ number
+
+    unsigned int trailer_len;           ///< management trailer length
+    unsigned int trailer_offset;        ///< management trailer offset
+
+    struct {
+        unsigned int use_port_ts : 1;   ///< use port 0 timestamper only (false),
+                                        ///< or port 0 (TX) and port N (RX)
+                                        ///< time stampers (true)
+        unsigned int irq_work_time_valid : 1;   ////< irq_work_time is set
+    };
+    struct work_struct irq_work;        ///< interrupt work
+    struct timespec64 irq_work_time;    ///< timestamper clock time
+    void __iomem *ioaddr;               ///< switch registers
+
+    uint16_t cpu_port_mask;             ///< port mask of CPU port, 1 bit only
+    struct hwtstamp_config tstamp_cfg;  ///< hardware timestamper config,
+                                        ///< synchronized via common_reg_lock
+    /// PTP (port 0) RX frame timestamper
+    struct deipce_tx_stamper rx_stamper;
+    unsigned int tx_stamper;            ///< PTP TX frame timestamper index
+
+    struct net_device *real_netdev;     ///< underlying MAC netdevice
+    struct net_device *netdev;          ///< switch (endpoint) net device
+    unsigned int num_of_ports;          ///< number of FRS ports
+    /// Port privates (some may be NULL)
+    struct deipce_port_priv *port[DEIPCE_MAX_PORTS];
+
+    struct deipce_switchdev switchdev;  ///< switchdev support
+    struct deipce_stats stats;          ///< IP statistics
+    struct mutex common_reg_lock;       ///< synchronize switch register access
+    struct mutex smac_table_lock;       ///< synchronize SMAC table access
+    struct {
+        struct frs_smac_table_config cfg; ///< table configuration
+        unsigned long int *used;        ///< bitmap of used entries
+        struct {
+            unsigned int no_vlan;       ///< number of rows used without VLAN
+            unsigned int vlan;          ///< number of rows used with VLAN
+        } col_count[FRS_SMAC_TABLE_COLS]; ///< column usage counts
+    } smac;                             ///< SMAC configuration information
+
+    struct deipce_features features;    ///< switch features
+
+    struct deipce_ibc_dev_priv *ibc;    ///< IBC instance or NULL
+    struct {
+        struct ptp_clock_info *info;    ///< PTP hardware clock instance
+        int index;                      ///< PTP hardware clock number
+    } phc;
+
+#ifdef CONFIG_DEBUG_FS
+    struct dentry *debugfs_dir;         ///< debugfs port directory
+#endif
+};
+
+/**
+ * FRS driver private information structure.
+ */
+struct deipce_drv_priv {
+    struct workqueue_struct *wq_low;    ///< low priority work queue
+    struct workqueue_struct *wq_high;   ///< high priority work queue
+
+    unsigned int dev_count;             ///< FRS device count
+    /// Privates of found devices
+    struct deipce_dev_priv *dev_priv[DEIPCE_MAX_DEVICES];
+
+    uint64_t *crc40_table;              ///< small CRC40 table (4-bit index)
+
+#ifdef CONFIG_DEBUG_FS
+    struct dentry *debugfs_dir;         ///< debugfs driver directory
+#endif
+};
+
+/**
+ * Checks if an FRS device has a CPU port.
+ * @param dp FRS device privates
+ * @return True if device has a CPU port, false if it doesn't
+ */
+static inline bool deipce_dev_has_cpu_port(struct deipce_dev_priv *dp)
+{
+    return dp->cpu_port_mask != 0;
+}
+
+/**
+ * Get pointer to given register for use with memory mapped I/O.
+ * @param ioaddr Pointer to start of mapped register area.
+ * @param regnum Register number.
+ * @return Memory mapped IO address of register regnum.
+ */
+static inline void __iomem *deipce_reg_addr(void __iomem *ioaddr,
+                                            unsigned int regnum)
+{
+    // Byte addressing: x2 is needed
+    return ioaddr + (regnum << 1);
+}
+
+/**
+ * Helper to read 32-bit port counter values.
+ * @param pp FRS port privates.
+ * @param low_reg_num Register number of the low word of 32-bit counter.
+ * @return 32-bit counter value or 0xffffffff on error.
+ */
+static inline uint32_t deipce_read_port_counter(struct deipce_port_priv *pp,
+                                                unsigned int low_reg_num)
+{
+    // They are properly aligned.
+    return ioread32(deipce_reg_addr(pp->ioaddr, low_reg_num));
+}
+
+static inline uint16_t deipce_read_port_reg(struct deipce_port_priv *pp,
+                                            unsigned int regnum)
+{
+    return ioread16(deipce_reg_addr(pp->ioaddr, regnum));
+}
+
+static inline void deipce_write_port_reg(struct deipce_port_priv *pp,
+                                         unsigned int regnum,
+                                         uint16_t value)
+{
+    iowrite16(value, deipce_reg_addr(pp->ioaddr, regnum));
+}
+
+/**
+ * Read adapter register. Adapters are optional, this must not be called
+ * if port has no adapter defined.
+ */
+static inline uint16_t deipce_read_adapter_reg(struct deipce_port_priv *pp,
+                                               unsigned int regnum)
+{
+    return ioread16(deipce_reg_addr(pp->adapter.ioaddr, regnum));
+}
+
+/**
+ * Write adapter register. Adapters are optional, this must not be called
+ * if port has no adapter defined.
+ */
+static inline void deipce_write_adapter_reg(struct deipce_port_priv *pp,
+                                            unsigned int regnum,
+                                            uint16_t value)
+{
+    iowrite16(value, deipce_reg_addr(pp->adapter.ioaddr, regnum));
+}
+
+static inline uint16_t deipce_read_switch_reg(struct deipce_dev_priv *dp,
+                                              unsigned int regnum)
+{
+    return ioread16(deipce_reg_addr(dp->ioaddr, regnum));
+}
+
+static inline void deipce_write_switch_reg(struct deipce_dev_priv *dp,
+                                           unsigned int regnum,
+                                           uint16_t value)
+{
+    iowrite16(value, deipce_reg_addr(dp->ioaddr, regnum));
+}
+
+static inline uint32_t deipce_read_switch_uint32(struct deipce_dev_priv *dp,
+                                                 unsigned int regnum)
+{
+    return ioread32(deipce_reg_addr(dp->ioaddr, regnum));
+}
+
+#endif
