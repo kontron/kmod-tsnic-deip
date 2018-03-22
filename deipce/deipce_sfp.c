@@ -136,7 +136,6 @@ bool deipce_set_sfp(struct deipce_port_priv *pp, enum deipce_sfp_type sfp)
  */
 int deipce_init_sfp(struct deipce_port_priv *pp)
 {
-#ifdef CONFIG_OF
     if (pp->sfp.eeprom_node) {
         pp->sfp.eeprom = of_find_i2c_device_by_node(pp->sfp.eeprom_node);
         if (pp->sfp.eeprom)
@@ -144,7 +143,6 @@ int deipce_init_sfp(struct deipce_port_priv *pp)
         else
             netdev_warn(pp->netdev, "SFP EEPROM node not found\n");
     }
-#endif
 
     pp->sfp.type = DEIPCE_SFP_NONE;
     deipce_set_sfp(pp, DEIPCE_SFP_NONE);

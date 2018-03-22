@@ -52,10 +52,22 @@
 #define FSC_ROW_DATA_CYCLES_MIN         64      ///< min. number of cycles
 #define FSC_ROW_DATA_CYCLES_MAX         U16_MAX ///< max. number of cycles
 
+// Generics registers
+
+#define FSC_GENERICS_BASE               0x4000
+#define FSC_GENERICS_SCHEDULERS         (FSC_GENERICS_BASE + 0x00)
+#define FSC_GENERICS_SCHEDULERS_MASK    0x7
+#define FSC_GENERICS_OUTPUTS            (FSC_GENERICS_BASE + 0x02)
+#define FSC_GENERICS_OUTPUTS_MASK       0x7f
+#define FSC_GENERICS_ROWS               (FSC_GENERICS_BASE + 0x04)
+#define FSC_GENERICS_ROWS_MASK          0xf
+#define FSC_GENERICS_CLK_FREQ           (FSC_GENERICS_BASE + 0x06)
+#define FSC_GENERICS_CLK_FREQ_MASK      0xff
+
 // Scheduler registers
 
 /// Offset to scheduler n registers
-#define FSC_SCHED_BASE(n)               (0X8000 + (n)*0x1000)
+#define FSC_SCHED_BASE(n)               (0x8000 + (n)*0x1000)
 
 // Scheduler common registers
 #define FSC_SCHED_GEN                   0x000   ///< SCH_GEN, downcounter

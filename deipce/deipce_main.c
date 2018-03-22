@@ -106,117 +106,82 @@ static void init_dev_privates(struct deipce_dev_priv *dp, int id)
     return;
 }
 
-#ifdef CONFIG_OF
-
 /**
- * Get switch features from device tree.
- * @param dp Device privates whose features to set.
+ * Read switch generic register value.
+ * @param dp Switch privates.
+ * @param reg Generic register to read.
+ * @param mask Bitmask for value.
+ * @return Masked generic value.
  */
-static int deipce_of_get_features(struct deipce_dev_priv *dp)
+static inline uint16_t deipce_read_generic(struct deipce_dev_priv *dp,
+                                           unsigned int reg,
+                                           uint16_t mask)
 {
-    struct device_node *frs_node = dp->this_dev->of_node;
-    struct device_node *node = NULL;
-    uint32_t value = 0;
-
-    // Older kernels do not have of_get_child_by_name.
-    for_each_child_of_node(frs_node, node) {
-        if (strcmp("features", node->name) == 0)
-            break;
-    }
-
-    if (!node) {
-        // features node is missing.
-        return -ENOENT;
-    }
-
-    if (of_property_read_u32(node, "clock-frequency", &value) == 0)
-        dp->features.clock_freq = value;
-    else
-        dp->features.clock_freq = 0;
-
-    dp->features.flags = 0;
-    if (of_property_read_bool(node, "gigabit"))
-        dp->features.flags |= FLX_FRS_FEAT_GIGABIT;
-    if (of_property_read_bool(node, "statistics-counters"))
-        dp->features.flags |= FLX_FRS_FEAT_STATS;
-    if (of_property_read_bool(node, "mac-address-table"))
-        dp->features.flags |= FLX_FRS_FEAT_MAC_TABLE;
-    if (of_property_read_bool(node, "vlan"))
-        dp->features.flags |= FLX_FRS_FEAT_VLAN;
-    if (of_property_read_bool(node, "traffic-shaper"))
-        dp->features.flags |= FLX_FRS_FEAT_SHAPER;
-
-    if (of_property_read_u32(node, "priority-queues", &value) == 0)
-        dp->features.prio_queues = value;
-    else
-        dp->features.prio_queues = 0;
-    if (of_property_read_u32(node, "traffic-policers", &value) == 0)
-        dp->features.policers = value;
-    else
-        dp->features.policers = 0;
-
-    if (of_property_read_u32(node,
-                             "static-mac-address-table-rows",
-                             &value) == 0)
-        dp->features.smac_rows = value;
-    else
-        dp->features.smac_rows = 0;
-
-    if (of_property_read_u32(node, "hsr-ports", &value) == 0)
-        dp->features.hsr_ports = value;
-    else
-        dp->features.hsr_ports = 0;
-    if (of_property_read_u32(node, "prp-ports", &value) == 0)
-        dp->features.prp_ports = value;
-    else
-        dp->features.prp_ports = 0;
-    if (of_property_read_u32(node, "macsec-ports", &value) == 0)
-        dp->features.macsec_ports = value;
-    else
-        dp->features.macsec_ports = 0;
-    if (of_property_read_u32(node, "scheduled-ports", &value) == 0)
-        dp->features.sched_ports = value;
-    else
-        dp->features.sched_ports = 0;
-    if (of_property_read_u32(node, "timestamper-ports", &value) == 0)
-        dp->features.ts_ports = value;
-    else
-        dp->features.ts_ports = 0;
-    if (of_property_read_u32(node, "cut-through-ports", &value) == 0)
-        dp->features.ct_ports = value;
-    else
-        dp->features.ct_ports = 0;
-    if (of_property_read_u32(node, "preemptable-ports", &value) == 0)
-        dp->features.preempt_ports = value;
-    else
-        dp->features.preempt_ports = 0;
-
-    return 0;
+    // Generics addresses are already byte addresses.
+    return deipce_read_switch_reg(dp, reg >> 1) & mask;
 }
 
-#endif
-
 /**
- * Sanitize switch features.
- * @param dp FRS device privates.
+ * Set switch features from switch generics registers.
+ * @param dp Switch privates.
  */
-static void deipce_sanitize_features(struct deipce_dev_priv *dp)
+static void deipce_read_switch_parameters(struct deipce_dev_priv *dp)
 {
     unsigned int column;
 
-    if (dp->features.prio_queues > DEIPCE_MAX_PRIO_QUEUES)
-        dp->features.prio_queues = DEIPCE_MAX_PRIO_QUEUES;
-    if (dp->features.prio_queues == 0)
-        dp->features.flags &= ~FLX_FRS_FEAT_SHAPER;
+    dev_dbg(dp->this_dev, "%s() read generics\n", __func__);
 
-    if (dp->features.policers > DEIPCE_MAX_POLICERS)
-        dp->features.policers = DEIPCE_MAX_POLICERS;
+    dp->features.mgmt_ports =
+        deipce_read_generic(dp, FRS_REG_GENERIC_MGMT_PORTS,
+                            FRS_REG_GENERIC_PORT_MASK);
+    dp->features.hsr_ports =
+        deipce_read_generic(dp, FRS_REG_GENERIC_HSR_PORTS,
+                            FRS_REG_GENERIC_PORT_MASK);
+    dp->features.prp_ports =
+        deipce_read_generic(dp, FRS_REG_GENERIC_PRP_PORTS,
+                            FRS_REG_GENERIC_PORT_MASK);
+    dp->features.ts_ports =
+        deipce_read_generic(dp, FRS_REG_GENERIC_TS_PORTS,
+                            FRS_REG_GENERIC_PORT_MASK);
+    dp->features.sched_ports =
+        deipce_read_generic(dp, FRS_REG_GENERIC_SCHED_PORTS,
+                            FRS_REG_GENERIC_PORT_MASK);
+    dp->features.ct_ports =
+        deipce_read_generic(dp, FRS_REG_GENERIC_CT_PORTS,
+                            FRS_REG_GENERIC_PORT_MASK);
+    dp->features.preempt_ports =
+        deipce_read_generic(dp, FRS_REG_GENERIC_PREEMPT_PORTS,
+                            FRS_REG_GENERIC_PORT_MASK);
+    dp->features.macsec_ports =
+        deipce_read_generic(dp, FRS_REG_GENERIC_MACSEC_PORTS,
+                            FRS_REG_GENERIC_PORT_MASK);
 
-    if (dp->features.smac_rows > FRS_SMAC_TABLE_MAX_ROWS)
-        dp->features.smac_rows = FRS_SMAC_TABLE_MAX_ROWS;
-    for (column = 0; column < FRS_SMAC_TABLE_COLS; column++) {
+    dp->features.clock_freq =
+        deipce_read_generic(dp, FRS_REG_GENERIC_CLK_FREQ,
+                            FRS_REG_GENERIC_CLK_FREQ_MASK) * 1000000;
+    dp->features.prio_queues =
+        deipce_read_generic(dp, FRS_REG_GENERIC_PRIO_QUEUES,
+                            FRS_REG_GENERIC_PRIO_QUEUES_MASK);
+    dp->features.policers = 1u <<
+        deipce_read_generic(dp, FRS_REG_GENERIC_POLICERS,
+                            FRS_REG_GENERIC_POLICERS_MASK);
+    dp->features.smac_rows = 1u <<
+        deipce_read_generic(dp, FRS_REG_GENERIC_SMAC_ROWS,
+                            FRS_REG_GENERIC_SMAC_ROWS_MASK);
+
+    dp->features.flags = 0;
+    if (deipce_read_generic(dp, FRS_REG_GENERIC_GIGABIT,
+                            FRS_REG_GENERIC_BOOL_MASK))
+        dp->features.flags |= FLX_FRS_FEAT_GIGABIT;
+    if (deipce_read_generic(dp, FRS_REG_GENERIC_COUNTERS,
+                            FRS_REG_GENERIC_BOOL_MASK))
+        dp->features.flags |= FLX_FRS_FEAT_STATS;
+    if (deipce_read_generic(dp, FRS_REG_GENERIC_SHAPERS,
+                            FRS_REG_GENERIC_BOOL_MASK))
+        dp->features.flags |= FLX_FRS_FEAT_SHAPER;
+
+    for (column = 0; column < FRS_SMAC_TABLE_COLS; column++)
         dp->smac.cfg.row_sel[column] = FLX_FRS_SMAC_ROW_SEL_NO_VLAN;
-    }
 
     return;
 }
@@ -287,8 +252,6 @@ static int deipce_device_config(struct deipce_dev_priv *dp,
                                 struct platform_device *pdev,
                                 struct deipce_cfg *frs_cfg)
 {
-#ifdef CONFIG_OF
-    struct resource *res = NULL;
     struct device *dev = &pdev->dev;
     struct device_node *child_n = NULL;
     const __be32 *reg = NULL;
@@ -298,6 +261,8 @@ static int deipce_device_config(struct deipce_dev_priv *dp,
         platform_get_resource(pdev, IORESOURCE_IRQ, 0);
     int ret = 0;
 
+    deipce_read_switch_parameters(dp);
+
     if (!irq_res) {
         // Allow operation without IRQ.
         dev_warn(dp->this_dev, "No IRQ defined\n");
@@ -305,11 +270,6 @@ static int deipce_device_config(struct deipce_dev_priv *dp,
     }
     else {
         dp->irq = irq_res->start;
-    }
-
-    ret = deipce_of_get_features(dp);
-    if (ret == -ENOENT) {
-        dev_warn(dev, "Missing features in device tree\n");
     }
 
     // Underlying Ethernet MAC name
@@ -335,16 +295,6 @@ static int deipce_device_config(struct deipce_dev_priv *dp,
         if (!dp->ibc)
             dev_warn(dp->this_dev, "Failed to get IBC\n");
         of_node_put(frs_cfg->ibc_node);
-    }
-
-    // Register access
-    res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
-    if (!res) {
-        dev_err(dev, "No I/O memory defined\n");
-        return -ENODEV;
-    }
-    else {
-        frs_cfg->baseaddr = res->start;
     }
 
     // Interface name for switch
@@ -379,6 +329,9 @@ static int deipce_device_config(struct deipce_dev_priv *dp,
             continue;
         }
 
+        if (dp->features.mgmt_ports & (1u << port_num))
+            port_cfg->flags |= DEIPCE_PORT_CPU;
+
         dev_dbg(dp->this_dev, "Reading node %s index %i port %i\n",
                 child_n->name, port_num, port_num);
 
@@ -387,9 +340,6 @@ static int deipce_device_config(struct deipce_dev_priv *dp,
             port_cfg->if_name = svalue;
         }
 
-        if (of_property_read_bool(child_n, "cpu-port")) {
-            port_cfg->flags |= DEIPCE_PORT_CPU;
-        }
         if (of_property_read_bool(child_n, "auto-speed-select")) {
             port_cfg->flags |= DEIPCE_PORT_SPEED_EXT;
         }
@@ -479,9 +429,6 @@ static int deipce_device_config(struct deipce_dev_priv *dp,
         if (port_num + 1 > frs_cfg->num_of_ports)
             frs_cfg->num_of_ports = port_num + 1;
     }
-#endif
-
-    deipce_sanitize_features(dp);
 
     return 0;
 }
@@ -581,7 +528,7 @@ static int deipce_init_ports(struct deipce_dev_priv *dp,
             }
         }
 
-        if (pp->flags & DEIPCE_PORT_CPU)
+        if (!dp->cpu_port_mask && (pp->flags & DEIPCE_PORT_CPU))
             dp->cpu_port_mask |= pp->trailer;
 
         if (dp->features.macsec_ports & pp->trailer)
@@ -763,7 +710,7 @@ static int deipce_device_init(struct platform_device *pdev)
     struct deipce_cfg *frs_cfg = NULL;
     uint32_t pdev_id = 0;
 
-    dev_info(&pdev->dev, "Init device\n");
+    dev_dbg(&pdev->dev, "Init device\n");
 
     frs_cfg = kmalloc(sizeof(*frs_cfg), GFP_KERNEL);
     if (!frs_cfg) {
@@ -808,6 +755,10 @@ static int deipce_device_init(struct platform_device *pdev)
     };
     init_dev_privates(dp, pdev_id);
 
+    ret = deipce_mmio_init_switch(dp, pdev, frs_cfg);
+    if (ret)
+        goto err_reg_access;
+
     ret = deipce_device_config(dp, pdev, frs_cfg);
     if (ret) {
         dev_err(dp->this_dev, "Failed to configure device\n");
@@ -844,9 +795,9 @@ static int deipce_device_init(struct platform_device *pdev)
     if (ret)
         goto err_init_ports;
 
-    ret = deipce_mmio_init_device(dp, pdev, frs_cfg);
+    ret = deipce_mmio_init_ports(dp, frs_cfg);
     if (ret)
-        goto err_reg_access;
+        goto err_port_reg_access;
 
     ret = deipce_irq_init(dp);
     if (ret)
@@ -886,9 +837,9 @@ err_registers:
     deipce_irq_cleanup(dp);
 
 err_irq:
-    deipce_mmio_cleanup_device(dp);
+    deipce_mmio_cleanup_ports(dp);
 
-err_reg_access:
+err_port_reg_access:
 err_init_ports:
     if (dp->smac.used) {
         kfree(dp->smac.used);
@@ -897,6 +848,9 @@ err_init_ports:
 
 err_smac:
 err_device_config:
+    deipce_mmio_cleanup_switch(dp);
+
+err_reg_access:
     drv->dev_priv[pdev_id] = NULL;
     kfree(dp);
 
@@ -928,7 +882,8 @@ static void deipce_device_cleanup(struct deipce_dev_priv *dp)
         dp->smac.used = NULL;
     }
 
-    deipce_mmio_cleanup_device(dp);
+    deipce_mmio_cleanup_ports(dp);
+    deipce_mmio_cleanup_switch(dp);
 
     for (i = 0; i < ARRAY_SIZE(dp->port); i++) {
         struct deipce_port_priv *pp = dp->port[i];

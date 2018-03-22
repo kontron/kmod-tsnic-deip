@@ -322,9 +322,7 @@ struct frs_smac_table_entry {
 // FES feature flags
 #define FLX_FRS_FEAT_GIGABIT    BIT(0)  ///< gigabit speed
 #define FLX_FRS_FEAT_STATS      BIT(1)  ///< statistics counters
-#define FLX_FRS_FEAT_VLAN       BIT(2)  ///< VLAN support
-#define FLX_FRS_FEAT_MAC_TABLE  BIT(3)  ///< MAC address table
-#define FLX_FRS_FEAT_SHAPER     BIT(4)  ///< traffic shaper
+#define FLX_FRS_FEAT_SHAPER     BIT(2)  ///< traffic shaper
 
 /**
  * FES features.
@@ -335,6 +333,7 @@ struct deipce_features {
     uint16_t smac_rows;         ///< number of static MAC address table rows
     uint16_t policers;          ///< number of policers
     uint16_t prio_queues;       ///< number of priority queues
+    uint16_t mgmt_ports;        ///< bitmask of management trailer capable ports
     uint16_t hsr_ports;         ///< bitmask of HSR-capable ports
     uint16_t prp_ports;         ///< bitmask of PRP-capable ports
     uint16_t macsec_ports;      ///< bitmask of MACsec-capable ports

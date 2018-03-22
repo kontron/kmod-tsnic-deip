@@ -40,27 +40,25 @@
  * @param pdev Platform device
  * @return 0 on success.
  */
-int deipce_mmio_init_device(struct deipce_dev_priv *dp,
+int deipce_mmio_init_switch(struct deipce_dev_priv *dp,
                             struct platform_device *pdev,
                             struct deipce_cfg *frs_cfg)
 {
     struct resource *res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
-    int i;
-    int ret = 0;
+    int ret = -ENXIO;
 
     dev_dbg(dp->this_dev, "Setup device for memory mapped register access\n");
 
     if (!res) {
         dev_err(dp->this_dev, "No I/O memory defined\n");
-        ret = -ENXIO;
         goto out;
     }
 
+    frs_cfg->baseaddr = res->start;
     dp->ioaddr = ioremap_nocache(res->start, resource_size(res));
     if (!dp->ioaddr) {
         dev_err(dp->this_dev, "ioremap failed for switch address 0x%llx\n",
                 (unsigned long long int) res->start);
-        ret = -ENXIO;
         goto out;
     }
 
@@ -68,6 +66,23 @@ int deipce_mmio_init_device(struct deipce_dev_priv *dp,
                "Device uses memory mapped access: 0x%llx/0x%llx\n",
                (unsigned long long int) res->start,
                (unsigned long long int) resource_size(res));
+
+    ret = 0;
+
+out:
+    return ret;
+}
+
+/**
+ * Init MMIO register access for ports.
+ * @param dp Device private
+ * @return 0 on success.
+ */
+int deipce_mmio_init_ports(struct deipce_dev_priv *dp,
+                           struct deipce_cfg *frs_cfg)
+{
+    int i;
+    int ret = 0;
 
     for (i = 0; i < ARRAY_SIZE(dp->port); i++) {
         struct deipce_port_priv *pp = dp->port[i];
@@ -120,7 +135,6 @@ int deipce_mmio_init_device(struct deipce_dev_priv *dp,
                    DEIPCE_ADAPTER_IOSIZE);
     }
 
-out:
     return ret;
 }
 
@@ -128,14 +142,23 @@ out:
  * Cleanup MMIO register access.
  * @param dp Device private
  */
-void deipce_mmio_cleanup_device(struct deipce_dev_priv *dp)
+void deipce_mmio_cleanup_switch(struct deipce_dev_priv *dp)
 {
-    int i;
-
     dev_dbg(dp->this_dev, "Cleanup device memory mapped register access\n");
 
     iounmap(dp->ioaddr);
     dp->ioaddr = NULL;
+
+    return;
+}
+
+/**
+ * Cleanup MMIO register access for ports.
+ * @param dp Device private
+ */
+void deipce_mmio_cleanup_ports(struct deipce_dev_priv *dp)
+{
+    int i;
 
     for (i = 0; i < ARRAY_SIZE(dp->port); i++) {
         struct deipce_port_priv *pp = dp->port[i];

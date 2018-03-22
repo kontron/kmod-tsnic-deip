@@ -24,9 +24,12 @@
 #ifndef DEIPCE_MMIO_H
 #define DEIPCE_MMIO_H
 
-int deipce_mmio_init_device(struct deipce_dev_priv *dp,
+int deipce_mmio_init_switch(struct deipce_dev_priv *dp,
                             struct platform_device *pdev,
                             struct deipce_cfg *frs_cfg);
-void deipce_mmio_cleanup_device(struct deipce_dev_priv *dp);
+int deipce_mmio_init_ports(struct deipce_dev_priv *dp,
+                           struct deipce_cfg *frs_cfg);
+void deipce_mmio_cleanup_switch(struct deipce_dev_priv *dp);
+void deipce_mmio_cleanup_ports(struct deipce_dev_priv *dp);
 
 #endif

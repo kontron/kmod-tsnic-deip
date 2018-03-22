@@ -34,8 +34,8 @@
 
 #include "deipce_types.h"
 
-#define DEIPCE_FSC_MAX_DEVICES     32
 #define DEIPCE_FSC_MAX_SCHEDULERS  8
+#define DEIPCE_FSC_MAX_OUTPUTS     64
 #define DEIPCE_FSC_MAX_TABLES      2
 #define DEIPCE_FSC_MAX_ROWS        1024
 

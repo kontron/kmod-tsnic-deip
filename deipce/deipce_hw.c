@@ -1019,3 +1019,50 @@ int deipce_write_port_ipo(struct deipce_port_priv *pp,
     return 0;
 }
 
+/**
+ * Get port cut-through status.
+ * @param pp Port privates.
+ * @return True when cut-through is enabled on port.
+ */
+bool deipce_get_cutthrough(struct deipce_port_priv *pp)
+{
+    struct deipce_netdev_priv *np = netdev_priv(pp->netdev);
+    bool enable;
+
+    mutex_lock(&np->link_mode_lock);
+    enable = deipce_read_port_reg(pp, PORT_REG_STATE) & PORT_STATE_RX_CT;
+    mutex_unlock(&np->link_mode_lock);
+
+    return enable;
+}
+
+/**
+ * Enable/disable cut-through on port.
+ * @param pp Port privates.
+ * @param enable True to enable cut-through on port.
+ */
+void deipce_set_cutthrough(struct deipce_port_priv *pp, bool enable)
+{
+    struct deipce_dev_priv *dp = pp->dp;
+    struct deipce_netdev_priv *np = netdev_priv(pp->netdev);
+    uint16_t port_state;
+    uint16_t tx_ct = 0;
+
+    if (enable)
+        tx_ct = (1u << dp->features.prio_queues) - 1u;
+
+    mutex_lock(&np->link_mode_lock);
+
+    port_state = deipce_read_port_reg(pp, PORT_REG_STATE);
+    if (enable)
+        port_state |= PORT_STATE_RX_CT;
+    else
+        port_state &= ~PORT_STATE_RX_CT;
+    deipce_write_port_reg(pp, PORT_REG_STATE, port_state);
+    deipce_write_port_reg(pp, PORT_REG_TX_CT, tx_ct);
+
+    mutex_unlock(&np->link_mode_lock);
+
+    return;
+}
+

@@ -93,16 +93,8 @@ int deipce_write_port_ipo(struct deipce_port_priv *pp,
                           uint8_t priority,
                           const uint8_t addr[IFHWADDRLEN],
                           uint8_t compare_length);
-#if 0
-int deipce_read_port_ipo(struct deipce_port_priv *pp,
-                         uint16_t entry,
-                         uint16_t *flags0,
-                         uint16_t *flags1,
-                         uint16_t *allow_mask,
-                         uint16_t *mirror_mask,
-                         uint8_t *priority,
-                         uint8_t addr[IFHWADDRLEN],
-                         uint8_t *compare_length);
-#endif
+
+bool deipce_get_cutthrough(struct deipce_port_priv *pp);
+void deipce_set_cutthrough(struct deipce_port_priv *pp, bool enable);
 
 #endif

@@ -119,38 +119,23 @@ static int deipce_fsc_mmio_init_device(struct deipce_fsc_dev_priv *dp)
 /**
  * Get device configuration.
  * @param dp Device privates.
- * @param pdev Platform_device.
  */
-static int deipce_fsc_device_config(struct deipce_fsc_dev_priv *dp,
-                                    struct platform_device *pdev)
+static int deipce_fsc_device_config(struct deipce_fsc_dev_priv *dp)
 {
+    struct device_node *node = NULL;
+    unsigned int value = 0;
     int ret = -ENXIO;
 
-#ifdef CONFIG_OF
-    uint32_t value = 0;
-    struct device_node *node = NULL;
+    dp->num_sched = deipce_fsc_read16(dp, FSC_GENERICS_SCHEDULERS);
+    dp->num_sched &= FSC_GENERICS_SCHEDULERS_MASK;
+    if (dp->num_sched == 0 || dp->num_sched > DEIPCE_FSC_MAX_SCHEDULERS)
+        return ret;
 
-    ret = of_property_read_u32(pdev->dev.of_node, "schedulers", &value);
-    if (ret) {
-        dev_err(&pdev->dev, "Number of schedulers is missing\n");
-        goto err_of;
-    }
-    if (value < 1 || value > DEIPCE_FSC_MAX_SCHEDULERS) {
-        dev_err(&pdev->dev, "Number of schedulers %u is invalid\n", value);
-        goto err_of;
-    }
-    dp->num_sched = value;
+    dp->num_outputs = deipce_fsc_read16(dp, FSC_GENERICS_OUTPUTS);
+    dp->num_outputs &= FSC_GENERICS_OUTPUTS_MASK;
+    if (dp->num_outputs == 0 || dp->num_outputs > DEIPCE_FSC_MAX_OUTPUTS)
+        return ret;
 
-    ret = of_property_read_u32(pdev->dev.of_node, "outputs", &value);
-    if (ret) {
-        dev_err(&pdev->dev, "Number of outputs is missing\n");
-        goto err_of;
-    }
-    if (value < 1 || value > 64) {
-        dev_err(&pdev->dev, "Number of outputs %u is invalid\n", value);
-        goto err_of;
-    }
-    dp->num_outputs = value;
     switch (dp->num_outputs) {
     case 5:
     case 9:
@@ -160,49 +145,6 @@ static int deipce_fsc_device_config(struct deipce_fsc_dev_priv *dp,
         dp->hold_output_mask = 0;
     }
 
-    ret = of_property_read_u32(pdev->dev.of_node, "clock-frequency", &value);
-    if (ret == 0) {
-        if (value == 0) {
-            dev_err(&pdev->dev, "Invalid clock frequency %u\n", value);
-            goto err_of;
-        }
-        dp->clock_cycle_length = 1000000000u/value;
-    }
-
-    ret = of_property_read_u32(pdev->dev.of_node, "rows", &value);
-    if (ret) {
-        dev_err(&pdev->dev, "Number of rows is missing\n");
-        goto err_of;
-    }
-    switch (value) {
-    case 64:
-    case 128:
-    case 256:
-    case 512:
-    case 1024:
-        dp->num_rows = value;
-        break;
-    default:
-        dev_err(&pdev->dev, "Number of rows %u is invalid\n", value);
-        goto err_of;
-    }
-
-    // Setting clock via device tree is optional.
-    node = of_parse_phandle(pdev->dev.of_node, "schedule-clock", 0);
-    if (node) {
-        dp->phc = deipce_clock_of_get_phc(node);
-        of_node_put(node);
-        if (!dp->phc)
-            dev_err(&pdev->dev, "Failed to get PHC\n");
-        dev_dbg(&pdev->dev, "Using default PHC index %i\n",
-                deipce_clock_get_phc_index(dp->phc));
-    }
-
-#else
-    dev_err(&pdev->dev, "Device tree support required\n");
-    return -ENXIO;
-#endif
-
     /*
      * Set output mask: first dp->num_output bits to 1.
      * Valid range is 1 - 64.
@@ -211,18 +153,36 @@ static int deipce_fsc_device_config(struct deipce_fsc_dev_priv *dp,
         (1ull << (dp->num_outputs - 1)) |
         ((1ull << (dp->num_outputs - 1)) - 1);
 
-    dev_printk(KERN_DEBUG, &pdev->dev,
+    value = deipce_fsc_read16(dp, FSC_GENERICS_ROWS);
+    value &= FSC_GENERICS_ROWS_MASK;
+    dp->num_rows = 1u << value;
+    if (dp->num_rows == 0 || dp->num_rows > DEIPCE_FSC_MAX_ROWS)
+        return ret;
+
+    value = deipce_fsc_read16(dp, FSC_GENERICS_CLK_FREQ);
+    value &= FSC_GENERICS_CLK_FREQ_MASK;
+    if (value == 0)
+        return ret;
+    dp->clock_cycle_length = 1000u / value;
+
+    // Setting clock via device tree is optional.
+    node = of_parse_phandle(dp->pdev->dev.of_node, "schedule-clock", 0);
+    if (node) {
+        dp->phc = deipce_clock_of_get_phc(node);
+        of_node_put(node);
+        if (!dp->phc)
+            dev_err(&dp->pdev->dev, "Failed to get PHC\n");
+        dev_dbg(&dp->pdev->dev, "Using default PHC index %i\n",
+                deipce_clock_get_phc_index(dp->phc));
+    }
+
+    dev_printk(KERN_DEBUG, &dp->pdev->dev,
                "FSC with %u schedulers, %u outputs, %u rows, "
                "clock cycle %u ns\n",
                dp->num_sched, dp->num_outputs, dp->num_rows,
                dp->clock_cycle_length);
 
     return 0;
-
-#ifdef CONFIG_OF
-err_of:
-#endif
-    return ret;
 }
 
 /**
@@ -293,10 +253,6 @@ static int deipce_fsc_init_sched(struct deipce_fsc_dev_priv *dp,
 
     // Configure clock frequency.
     switch (dp->clock_cycle_length) {
-    case 0:
-        // default 8 ns, old version without downcounter speed register
-        dp->clock_cycle_length = 8;
-        return 0;
     case 8:
         dc_speed = FSC_SCHED_DC_SPEED_125MHZ;
         break;
@@ -347,22 +303,21 @@ static int deipce_fsc_device_init(struct platform_device *pdev)
 
     *dp = (struct deipce_fsc_dev_priv) {
         .pdev = pdev,
-        .clock_cycle_length = 8,
     };
 
     mutex_init(&dp->lock);
     INIT_LIST_HEAD(&dp->list);
     list_add(&dp->list, &drv->devices);
 
-    ret = deipce_fsc_device_config(dp, pdev);
+    ret = deipce_fsc_mmio_init_device(dp);
+    if (ret)
+        goto err_init;
+
+    ret = deipce_fsc_device_config(dp);
     if (ret) {
         dev_err(&dp->pdev->dev, "Failed to configure device\n");
         goto err_config;
     }
-
-    ret = deipce_fsc_mmio_init_device(dp);
-    if (ret)
-        goto err_init;
 
     for (sched_num = 0; sched_num < dp->num_sched; sched_num++) {
         sched = &dp->sched[sched_num];
@@ -397,8 +352,8 @@ static int deipce_fsc_device_init(struct platform_device *pdev)
 err_sched_init:
     deipce_fsc_mmio_cleanup_device(dp);
 
-err_init:
 err_config:
+err_init:
     list_del(&dp->list);
     dp->pdev = NULL;
     kfree(dp);

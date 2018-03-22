@@ -263,7 +263,6 @@ static bool deipce_phy_connect(struct net_device *netdev,
                                struct deipce_phy *phy,
                                void (*adjust_link)(struct net_device *netdev))
 {
-#ifdef CONFIG_OF
     struct phy_device *orig_phydev = netdev->phydev;
 
     if (!phy->node) {
@@ -292,11 +291,6 @@ out:
         netdev->phydev = orig_phydev;
 
     return phy->phydev != NULL;
-
-#else
-    netdev_dbg(netdev, "No PHY configured\n");
-    return false;
-#endif
 }
 
 /**

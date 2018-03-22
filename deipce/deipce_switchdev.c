@@ -421,9 +421,6 @@ static int deipce_switchdev_port_vlan_add(
     uint16_t port_mask = 0;
     uint16_t vid = 0;
 
-    if (!(dp->features.flags & FLX_FRS_FEAT_VLAN))
-        return -EOPNOTSUPP;
-
     netdev_dbg(netdev, "%s() ADD %u .. %u flags 0x%x ph %s\n",
                __func__, vlan->vid_begin, vlan->vid_end, vlan->flags,
                deipce_switchdev_trans_str(trans));
@@ -629,9 +626,6 @@ static int deipce_switchdev_port_vlan_del(
     uint16_t port_mask = 0;
     uint16_t vid = 0;
 
-    if (!(dp->features.flags & FLX_FRS_FEAT_VLAN))
-        return -EOPNOTSUPP;
-
     netdev_dbg(netdev, "%s() DEL %u .. %u flags 0x%x\n",
                __func__, vlan->vid_begin, vlan->vid_end, vlan->flags);
 
@@ -772,9 +766,6 @@ static int deipce_switchdev_port_vlan_dump(
     uint16_t port_vlan = 0;
     uint16_t port_mask = 0;
     uint16_t vid = 0;
-
-    if (!(dp->features.flags & FLX_FRS_FEAT_VLAN))
-        return -EOPNOTSUPP;
 
     netdev_dbg(netdev, "%s() DUMP\n", __func__);
 
@@ -1062,12 +1053,10 @@ int deipce_switchdev_enable(struct net_device *netdev)
     netdev_dbg(netdev, "%s()\n", __func__);
 
     if (dp->switchdev.enabled_port_count++ == 0) {
-        if (dp->features.flags & FLX_FRS_FEAT_MAC_TABLE) {
-            dev_dbg(dp->this_dev, "%s() Start polling MAC address table\n",
-                    __func__);
-            queue_delayed_work(drv->wq_low, &dp->switchdev.notify_fdb,
-                               DEIPCE_SWITCHDEV_NOTIFY_FDB_INTERVAL);
-        }
+        dev_dbg(dp->this_dev, "%s() Start polling MAC address table\n",
+                __func__);
+        queue_delayed_work(drv->wq_low, &dp->switchdev.notify_fdb,
+                           DEIPCE_SWITCHDEV_NOTIFY_FDB_INTERVAL);
     }
 
     return 0;
@@ -1088,11 +1077,9 @@ void deipce_switchdev_disable(struct net_device *netdev)
     // Retain learned FDB entries as long as FES remembers them.
 
     if (--dp->switchdev.enabled_port_count == 0) {
-        if (dp->features.flags & FLX_FRS_FEAT_MAC_TABLE) {
-            dev_dbg(dp->this_dev, "%s() Stop polling MAC address table\n",
-                    __func__);
-            cancel_delayed_work_sync(&dp->switchdev.notify_fdb);
-        }
+        dev_dbg(dp->this_dev, "%s() Stop polling MAC address table\n",
+                __func__);
+        cancel_delayed_work_sync(&dp->switchdev.notify_fdb);
     }
 
     return;
@@ -1264,15 +1251,12 @@ void deipce_switchdev_cleanup_device(struct deipce_dev_priv *dp)
 
     dev_dbg(dp->this_dev, "%s()\n", __func__);
 
-    if (dp->features.flags & FLX_FRS_FEAT_MAC_TABLE) {
-        dev_dbg(dp->this_dev, "%s() Stop polling MAC address table\n",
-                __func__);
-        cancel_delayed_work_sync(&dp->switchdev.notify_fdb);
+    dev_dbg(dp->this_dev, "%s() Stop polling MAC address table\n", __func__);
+    cancel_delayed_work_sync(&dp->switchdev.notify_fdb);
 
-        hash_for_each_safe(dp->switchdev.fdb, bkt, tmp, fdb_entry, hlist) {
-            hash_del(&fdb_entry->hlist);
-            kfree(fdb_entry);
-        }
+    hash_for_each_safe(dp->switchdev.fdb, bkt, tmp, fdb_entry, hlist) {
+        hash_del(&fdb_entry->hlist);
+        kfree(fdb_entry);
     }
 
     return;
