@@ -28,14 +28,15 @@
 
 struct deipce_fsc_dev_priv;
 struct ptp_clock_info;
+struct deipce_time;
 
 int __init deipce_fsc_init_driver(void);
 void deipce_fsc_cleanup_driver(void);
 
 struct deipce_fsc_dev_priv *deipce_fsc_of_get_device_by_node(
         struct device_node *node);
-int deipce_fsc_set_clock(struct deipce_fsc_dev_priv *fsc,
-                         struct ptp_clock_info *phc);
+int deipce_fsc_set_time(struct deipce_fsc_dev_priv *fsc,
+                        struct deipce_time *dt);
 struct ptp_clock_info *deipce_fsc_get_clock(struct deipce_fsc_dev_priv *fsc);
 void deipce_fsc_update_link(struct deipce_fsc_dev_priv *fsc,
                             unsigned int sched_num,

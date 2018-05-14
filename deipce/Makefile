@@ -15,14 +15,14 @@ ifneq ($(KERNELRELEASE),)
 
 ccflags-y += -Wall
 obj-m += deipce.o
-deipce-y := deipce_main.o deipce_mmio.o \
+deipce-y := deipce_main.o \
 	deipce_netdev.o deipce_netdevif.o \
 	deipce_ioctl.o deipce_hw.o deipce_ethtool.o \
 	deipce_adapter.o deipce_sfp.o deipce_preempt.o \
 	deipce_clock_main.o deipce_clock_nco.o \
 	deipce_fpts_main.o \
 	deipce_fsc_main.o deipce_fsc_hw.o deipce_ibc_main.o \
-	deipce_shaper.o
+	deipce_shaper.o deipce_time.o
 
 deipce-$(CONFIG_NET_SWITCHDEV) += deipce_switchdev.o
 deipce-$(CONFIG_PTP_1588_CLOCK) += deipce_clock_ptp.o

@@ -37,13 +37,13 @@
 #include <linux/udp.h>
 #include <linux/rtnetlink.h>
 #include <linux/sched.h>
-#include <linux/ptp_clock_kernel.h>
 
 #include "deipce_main.h"
 #include "deipce_types.h"
 #include "deipce_if.h"
 #include "deipce_hw.h"
 #include "deipce_preempt.h"
+#include "deipce_time.h"
 #include "deipce_netdev.h"
 #include "deipce_netdevif.h"
 
@@ -97,9 +97,6 @@ static const struct deipce_ipo deipce_ipo_reserved[] = {
 
 /// Total number of IPO entries
 #define DEIPCE_IPO_ENTRIES 16
-/// Use the last IPO entries for driver entries
-#define DEIPCE_IPO_FIRST_ENTRY \
-    (DEIPCE_IPO_ENTRIES - ARRAY_SIZE(deipce_ipo_reserved))
 
 /// Null MAC address for unused IPO entries
 static const uint8_t null_mac_addr[] = {
@@ -159,21 +156,20 @@ int deipce_skb_add_trailer(struct sk_buff *skb, unsigned int trailer,
  * @return CPU port privates, or NULL if FES does not have a CPU port.
  * It is expected that it has one.
  */
-struct deipce_port_priv *deipce_get_cpu_port(struct deipce_dev_priv *dp)
+static struct deipce_port_priv *deipce_get_cpu_port(struct deipce_dev_priv *dp)
 {
     unsigned long int port_mask = dp->cpu_port_mask;
     unsigned int port_num = find_first_bit(&port_mask, DEIPCE_MAX_PORTS);
     struct deipce_port_priv *port = NULL;
 
-    if (port_num >= ARRAY_SIZE(dp->port)) {
-        dev_err(dp->this_dev, "Invalid port number %i\n", port_num);
+    if (port_num >= DEIPCE_MAX_PORTS) {
+        dev_err(dp->this_dev, "No CPU port\n");
         return NULL;
     }
-    port = dp->port[port_num];
 
+    port = dp->port[port_num];
     if (!port) {
-        dev_err(dp->this_dev, "Device %u port %u is unknown\n",
-                dp->dev_num, port_num);
+        dev_err(dp->this_dev, "CPU port %u is unknown\n", port_num);
         return NULL;
     }
 
@@ -222,55 +218,60 @@ static bool deipce_match_reserved(const uint8_t *address)
  * Get prioritization for incoming management traffic.
  * RTNL lock must be held when calling this.
  * @param pp Port privates.
- * @param prio Place for priority class or NULL.
- * @param enable Place for priority override enable flag or NULL.
+ * @return Traffic class.
  */
-void deipce_get_mgmt_prio(struct deipce_port_priv *pp,
-                          unsigned int *prio, bool *enable)
+unsigned int deipce_get_mgmt_tc(struct deipce_port_priv *pp)
 {
-    struct deipce_dev_priv *dp = pp->dp;
-
-    if (prio) {
-        *prio = PORT_ETH_ADDR_TO_PRIO(pp->mgmt_prio);
-
-        // In case of 4 queues, map classes (0-3) <--> queues (0,2,4,6) in IP.
-        if (dp->features.prio_queues == 4)
-            *prio >>= 1;
-    }
-
-    if (enable)
-        *enable = !(pp->mgmt_prio & PORT_ETH_ADDR_PRESERVE_PRIORITY);
-
-    return;
+    return pp->mgmt_tc;
 }
 
 /**
- * Set prioritization for incoming management traffic.
+ * Set traffic class for incoming management traffic.
  * RTNL lock must be held when calling this.
  * @param pp Port privates.
- * @param prio Priority class.
- * @param enable True to enable priority override, false to preserve priority.
+ * @param tc traffic class.
  */
-int deipce_set_mgmt_prio(struct deipce_port_priv *pp, unsigned int prio,
-                         bool enable)
+int deipce_set_mgmt_tc(struct deipce_port_priv *pp, unsigned int tc)
 {
     struct deipce_dev_priv *dp = pp->dp;
     int ret;
 
-    if (prio >= dp->features.prio_queues)
+    if (tc >= dp->features.prio_queues)
         return -EINVAL;
 
-    // In case of 4 queues, map classes (0-3) <--> queues (0,2,4,6) in IP.
-    if (dp->features.prio_queues == 4)
-        prio <<= 1;
+    pp->mgmt_tc = tc;
+    ret = deipce_update_ipo_rules(pp->netdev);
 
-    pp->mgmt_prio &= ~PORT_ETH_ADDR_PRIORITY_MASK;
-    pp->mgmt_prio |= PORT_ETH_ADDR_FROM_PRIO(prio);
-    if (enable)
-        pp->mgmt_prio &= ~PORT_ETH_ADDR_PRESERVE_PRIORITY;
+    return ret;
+}
+
+/**
+ * Get incoming traffic mirror port.
+ * RTNL lock must be held when calling this.
+ * @param pp Port privates.
+ * @return Port number for mirroring all traffic, or -1 if disabled.
+ */
+int deipce_get_mirror_port(struct deipce_port_priv *pp)
+{
+    return pp->mirror_port;
+}
+
+/**
+ * Set incoming traffic mirroring.
+ * RTNL lock must be held when calling this.
+ * @param pp Port privates.
+ * @param mirror_port Port number of the port to mirror traffic to,
+ * or -1 to disable mirroring.
+ */
+int deipce_set_mirror_port(struct deipce_port_priv *pp, int mirror_port)
+{
+    struct deipce_dev_priv *dp = pp->dp;
+    int ret;
+
+    if (mirror_port >= 0 && mirror_port < dp->num_of_ports)
+        pp->mirror_port = mirror_port;
     else
-        pp->mgmt_prio |= PORT_ETH_ADDR_PRESERVE_PRIORITY;
-
+        pp->mirror_port = -1;
     ret = deipce_update_ipo_rules(pp->netdev);
 
     return ret;
@@ -286,33 +287,66 @@ int deipce_update_ipo_rules(struct net_device *netdev)
     struct deipce_netdev_priv *np = netdev_priv(netdev);
     struct deipce_port_priv *pp = np->pp;
     struct deipce_dev_priv *dp = np->dp;
-    unsigned int entry = DEIPCE_IPO_FIRST_ENTRY;
+    unsigned int entry = 0;
     unsigned int i = 0;
     const struct deipce_ipo *ipodata = NULL;
+    uint16_t all_ports = (1u << dp->num_of_ports) - 1u;
+    uint16_t allow_reserved;
+    uint16_t mirror_reserved;
+    uint16_t mirror_all = 0;
     int ret = -EIO;
-    uint16_t allow_mask;
+    uint16_t mgmt_prio;
 
     netdev_dbg(netdev, "%s()\n", __func__);
 
+    if (pp->mirror_port >= 0)
+        mirror_all = 1u << pp->mirror_port;
+
+    // In case of 4 queues, map classes (0-3) <--> queues (0,2,4,6) in IP.
+    if (dp->features.prio_queues == 4)
+        mgmt_prio = PORT_ETH_ADDR_FROM_PRIO(pp->mgmt_tc << 1);
+    else
+        mgmt_prio = PORT_ETH_ADDR_FROM_PRIO(pp->mgmt_tc);
+
     if (pp->flags & DEIPCE_PORT_CPU) {
-        // Allow forwarding to all ports.
-        allow_mask = (1u << dp->num_of_ports) - 1u;
+        // Allow forwarding reserved traffic to all ports.
+        allow_reserved = all_ports;
+        mirror_reserved = mirror_all;
     }
     else {
-        // Allow forwarding to CPU port only.
-        allow_mask = dp->cpu_port_mask;
+        /*
+         * Allow and force forwarding reserved traffic only to CPU port
+         * and possibly to mirror port.
+         */
+        allow_reserved = dp->cpu_port_mask | mirror_all;
+        mirror_reserved = allow_reserved;
     }
 
     for (i = 0; i < ARRAY_SIZE(deipce_ipo_reserved); i++) {
         ipodata = &deipce_ipo_reserved[i];
         ret = deipce_write_port_ipo(pp, entry++,
-                                    ipodata->cfg0 | pp->mgmt_prio,
+                                    ipodata->cfg0 | mgmt_prio,
                                     ipodata->cfg1,
-                                    allow_mask, 0, 0,
+                                    allow_reserved, mirror_reserved, 0,
                                     ipodata->address, ipodata->cmp_len);
         if (ret)
             return ret;
     }
+
+    if (mirror_all)
+        ret = deipce_write_port_ipo(pp, entry++,
+                                    PORT_ETH_ADDR_ENABLE |
+                                    PORT_ETH_ADDR_DEST |
+                                    PORT_ETH_ADDR_PRESERVE_PRIORITY,
+                                    0,
+                                    all_ports, mirror_all, 0,
+                                    null_mac_addr, 0);
+    else
+        ret = deipce_write_port_ipo(pp, entry++,
+                                    0, 0, 0, 0, 0,
+                                    null_mac_addr, 0);
+    if (ret)
+        return ret;
 
     // Clear the rest IPO entries.
     for (; entry < DEIPCE_IPO_ENTRIES; entry++) {
@@ -885,25 +919,16 @@ static int deipce_get_port_timestamp(struct deipce_port_priv *pp,
 static int deipce_rx_timestamp(struct deipce_dev_priv *dp,
                                uint8_t *ptp_hdr, ktime_t *timestamp)
 {
-    unsigned int rx_stamper = dp->rx_stamper.next;
-    uint16_t rx_ts_ctrl = deipce_read_switch_reg(dp, FRS_REG_TS_CTRL_RX);
     uint16_t *tmp = NULL;
     unsigned int i = 0;
-    int ret;
-
-    dev_ts_dbg(dp->this_dev, "RX: TS_CTRL 0x%x 0x%x %i check\n",
-               rx_ts_ctrl, 1 << rx_stamper, rx_stamper);
-    if (rx_ts_ctrl & (1 << rx_stamper))
-        return -ENOENT;
-
-    // Timestamp is available.
-    dev_ts_dbg(dp->this_dev, "RX: TS_CTRL 0x%x 0x%x %i available\n",
-               rx_ts_ctrl, 1 << rx_stamper, rx_stamper);
+    int ret = -ENOENT;
 
     if (!dp->irq_work_time_valid) {
-        ret = dp->phc.info->gettime64(dp->phc.info, &dp->irq_work_time);
+        ret = deipce_time_get_time(dp->time, DEIPCE_TIME_SEL_TS,
+                                   &dp->irq_work_time);
         if (ret)
             return ret;
+
         dp->irq_work_time_valid = true;
     }
 
@@ -912,21 +937,13 @@ static int deipce_rx_timestamp(struct deipce_dev_priv *dp,
     for (i = 0; i < FRS_TS_HDR_LEN / 2; i++) {
         // LSB contains first byte.
         tmp[i] = __cpu_to_le16(deipce_read_switch_reg(
-                        dp, FRS_TS_RX_HDR(rx_stamper, i)));
+                        dp, FRS_TS_RX_HDR(dp->rx_stamper.next, i)));
     }
 
-    ret = deipce_get_timestamp(dp, FRS_TS_RX_OFS(rx_stamper),
+    ret = deipce_get_timestamp(dp, FRS_TS_RX_OFS(dp->rx_stamper.next),
                                &dp->irq_work_time, timestamp);
-    if (ret)
-        return ret;
 
-    // Enable read timestamp.
-    deipce_write_switch_reg(dp, FRS_REG_TS_CTRL_RX, 1 << rx_stamper);
-
-    // Go to next entry.
-    dp->rx_stamper.next = (rx_stamper + 1) % FRS_TS_NUMBER_TIMESTAMPS;
-
-    return 0;
+    return ret;
 }
 
 /**
@@ -939,53 +956,32 @@ static int deipce_port_tx_timestamp(struct deipce_port_priv *port,
                                     uint8_t *ptp_hdr, ktime_t *timestamp)
 {
     struct deipce_dev_priv *dp = port->dp;
-    unsigned int tx_stamper = port->tx_stamper.next;
-    uint16_t tx_ts_ctrl = deipce_read_port_reg(port, PORT_REG_TS_CTRL_TX);
-    uint16_t *tmp = NULL;
+    uint16_t *tmp = (uint16_t *) ptp_hdr;
     unsigned int i = 0;
     int ret;
 
-    dev_ts_dbg(dp->this_dev, "%s TX: TS_CTRL 0x%x 0x%x %i check\n",
-               netdev_name(port->netdev),
-               tx_ts_ctrl, 1 << tx_stamper, tx_stamper);
-
-    if (tx_ts_ctrl & (1 << tx_stamper))
-        return -ENOENT;
-
-    // Timestamp is available.
-    dev_ts_dbg(dp->this_dev, "%s TX: TS_CTRL 0x%x 0x%x %i available\n",
-               netdev_name(port->netdev),
-               tx_ts_ctrl, 1 << tx_stamper, tx_stamper);
-
     if (!dp->irq_work_time_valid) {
-        ret = dp->phc.info->gettime64(dp->phc.info, &dp->irq_work_time);
+        ret = deipce_time_get_time(dp->time, DEIPCE_TIME_SEL_TS,
+                                   &dp->irq_work_time);
         if (ret)
             return ret;
+
         dp->irq_work_time_valid = true;
     }
 
     // Copy frame.
-    tmp = (uint16_t *) ptp_hdr;
     for (i = 0; i < FRS_TS_HDR_LEN / 2; i++) {
         // LSB contains first byte.
         tmp[i] = __cpu_to_le16(deipce_read_port_reg(
-                        port, PORT_TS_TX_HDR(tx_stamper, i)));
+                        port, PORT_TS_TX_HDR(port->tx_stamper.next, i)));
     }
 
-    // 802.1AS: <egressTimestamp> = <egressMeasuredTimestamp> + egressLatency
-    ret = deipce_get_port_timestamp(port, PORT_TS_TX_OFS(tx_stamper),
+    // 802.1AS: <egressTimestamp> = <egressMeasuredTimestamp> + <egressLatency>
+    ret = deipce_get_port_timestamp(port, PORT_TS_TX_OFS(port->tx_stamper.next),
                                     &dp->irq_work_time,
                                     port->cur_delay.tx, timestamp);
-    if (ret)
-        return ret;
 
-    // Enable read timestamp.
-    deipce_write_port_reg(port, PORT_REG_TS_CTRL_TX, 1 << tx_stamper);
-
-    // Go to next entry.
-    port->tx_stamper.next = (tx_stamper + 1) % PORT_TS_NUMBER_TIMESTAMPS;
-
-    return 0;
+    return ret;
 }
 
 /**
@@ -1002,28 +998,30 @@ static int deipce_tx_timestamp(struct deipce_dev_priv *dp,
     const uint16_t *tmp = NULL;
     uint16_t tx_ts_ctrl = deipce_read_switch_reg(dp, FRS_REG_TS_CTRL_TX);
     uint16_t tx_ts_ctrl_enable = 0;
-    unsigned int tx_stamper = dp->tx_stamper;
     unsigned int i = 0;
     uint16_t data = 0;
     bool found = false;
     int ret;
 
     dev_ts_dbg(dp->this_dev, "TX: TS_CTRL 0x%x 0x%x %i check\n",
-               tx_ts_ctrl, 1u << tx_stamper, dp->tx_stamper);
-
-    if (!dp->phc.info)
-        return -ENODEV;
+               tx_ts_ctrl, 1u << dp->tx_stamper, dp->tx_stamper);
 
     // This assumes frames are seen in FRS output order.
-    while (!(tx_ts_ctrl & (1u << tx_stamper))) {
+    while (!(tx_ts_ctrl & (1u << dp->tx_stamper))) {
         // Timestamp is available.
+        tx_ts_ctrl_enable = 1u << dp->tx_stamper;
+
+        // Avoid loop.
+        tx_ts_ctrl |= tx_ts_ctrl_enable;
+
         dev_ts_dbg(dp->this_dev, "TX: TS_CTRL 0x%x 0x%x %i available\n",
-                   tx_ts_ctrl, 1u << tx_stamper, tx_stamper);
-        // Check if timestamp header is the desired one
+                   tx_ts_ctrl, tx_ts_ctrl_enable, dp->tx_stamper);
+
+        // Check if timestamp header is the desired one.
         tmp = (uint16_t *) ptp_hdr;
         found = true;
         for (i = 0; i < FRS_TS_HDR_LEN / 2; i++) {
-            data = deipce_read_switch_reg(dp, FRS_TS_TX_HDR(tx_stamper, i));
+            data = deipce_read_switch_reg(dp, FRS_TS_TX_HDR(dp->tx_stamper, i));
             // LSB contains first byte.
             if (__le16_to_cpu(tmp[i]) != data) {
                 found = false;
@@ -1032,27 +1030,20 @@ static int deipce_tx_timestamp(struct deipce_dev_priv *dp,
         }
 
         if (found) {
-            ret = dp->phc.info->gettime64(dp->phc.info, &cur_time);
-            if (ret)
-                return ret;
-
-            ret = deipce_get_timestamp(dp, FRS_TS_TX_OFS(tx_stamper),
-                                       &cur_time, timestamp);
-            if (ret)
-                return ret;
+            ret = deipce_time_get_time(dp->time, DEIPCE_TIME_SEL_TS, &cur_time);
+            if (ret == 0)
+                ret = deipce_get_timestamp(dp, FRS_TS_TX_OFS(dp->tx_stamper),
+                                           &cur_time, timestamp);
         }
 
-        // Enable timestamp.
-        tx_ts_ctrl_enable = 1 << tx_stamper;
-        // Avoid loop.
-        tx_ts_ctrl |= tx_ts_ctrl_enable;
+        // Always enable timestamper.
         deipce_write_switch_reg(dp, FRS_REG_TS_CTRL_TX, tx_ts_ctrl_enable);
 
         // Go to next entry.
-        tx_stamper = (tx_stamper + 1) % FRS_TS_NUMBER_TIMESTAMPS;
-        dp->tx_stamper = tx_stamper;
+        dp->tx_stamper = (dp->tx_stamper + 1) % FRS_TS_NUMBER_TIMESTAMPS;
+
         if (found)
-            return 0;
+            return ret;
     }
 
     return -ENOENT;
@@ -1073,7 +1064,6 @@ static int deipce_port_rx_timestamp(struct deipce_port_priv *port,
     const uint16_t *tmp = NULL;
     uint16_t rx_ts_ctrl = deipce_read_port_reg(port, PORT_REG_TS_CTRL_RX);
     uint16_t rx_ts_ctrl_enable = 0;
-    unsigned int rx_stamper = port->rx_stamper;
     uint16_t data = 0;
     unsigned int i = 0;
     bool found = false;
@@ -1081,23 +1071,27 @@ static int deipce_port_rx_timestamp(struct deipce_port_priv *port,
 
     dev_ts_dbg(dp->this_dev, "%s RX: TS_CTRL 0x%x 0x%x %i check\n",
                netdev_name(port->netdev),
-               rx_ts_ctrl, 1u << rx_stamper, rx_stamper);
-
-    if (!dp->phc.info)
-        return -ENODEV;
+               rx_ts_ctrl, 1u << port->rx_stamper, port->rx_stamper);
 
     // This assumes frames are seen in FRS input order.
-    while (!(rx_ts_ctrl & (1u << rx_stamper))) {
+    while (!(rx_ts_ctrl & (1u << port->rx_stamper))) {
         // Timestamp available
+        rx_ts_ctrl_enable = 1u << port->rx_stamper;
+
+        // Avoid loop.
+        rx_ts_ctrl |= rx_ts_ctrl_enable;
+
         dev_ts_dbg(dp->this_dev,
                    "%s RX: TS_CTRL 0x%x 0x%x %i available\n",
                    netdev_name(port->netdev),
-                   rx_ts_ctrl, 1u << rx_stamper, rx_stamper);
-        // Check if timestamp header is the desired one
+                   rx_ts_ctrl, rx_ts_ctrl_enable, port->rx_stamper);
+
+        // Check if timestamp header is the desired one.
         tmp = (uint16_t *) ptp_hdr;
         found = true;
         for (i = 0; i < FRS_TS_HDR_LEN / 2; i++) {
-            data = deipce_read_port_reg(port, PORT_TS_RX_HDR(rx_stamper, i));
+            data = deipce_read_port_reg(port,
+                                        PORT_TS_RX_HDR(port->rx_stamper, i));
             // LSB contains first byte.
             if (__le16_to_cpu(tmp[i]) != data) {
                 found = false;
@@ -1105,34 +1099,29 @@ static int deipce_port_rx_timestamp(struct deipce_port_priv *port,
             }
         }
 
+        /*
+         * 802.1AS:
+         * <ingressTimestamp> = <ingressMeasuredTimestamp> - <ingressLatency>
+         */
         if (found) {
-            ret = dp->phc.info->gettime64(dp->phc.info, &cur_time);
-            if (ret)
-                return ret;
-
-            /*
-             * 802.1AS:
-             * <ingressTimestamp> = <ingressMeasuredTimestamp> - ingressLatency
-             */
-            ret = deipce_get_port_timestamp(port, PORT_TS_RX_OFS(rx_stamper),
-                                            &cur_time,
-                                            -(long int)port->cur_delay.rx,
-                                            timestamp);
-            if (ret)
-                return ret;
+            ret = deipce_time_get_time(dp->time, DEIPCE_TIME_SEL_TS, &cur_time);
+            if (ret == 0)
+                ret = deipce_get_port_timestamp(
+                        port,
+                        PORT_TS_RX_OFS(port->rx_stamper),
+                        &cur_time,
+                        -(long int)port->cur_delay.rx,
+                        timestamp);
         }
 
-        // Enable timestamp
-        rx_ts_ctrl_enable = 1 << rx_stamper;
-        // Avoid loop
-        rx_ts_ctrl |= rx_ts_ctrl_enable;
+        // Always enable timestamper.
         deipce_write_port_reg(port, PORT_REG_TS_CTRL_RX, rx_ts_ctrl_enable);
 
-        // Go to next entry
-        rx_stamper = (rx_stamper + 1) % FRS_TS_NUMBER_TIMESTAMPS;
-        port->rx_stamper = rx_stamper;
+        // Go to next entry.
+        port->rx_stamper = (port->rx_stamper + 1) % FRS_TS_NUMBER_TIMESTAMPS;
+
         if (found)
-            return 0;
+            return ret;
     }
 
     return -ENOENT;
@@ -1242,12 +1231,37 @@ static void deipce_get_rx_timestamp(struct deipce_dev_priv *dp)
 {
     ktime_t timestamp = ktime_set(0, 0);
     uint8_t frame[FRS_TS_HDR_LEN] = { 0 };
+    uint16_t rx_ts_ctrl = deipce_read_switch_reg(dp, FRS_REG_TS_CTRL_RX);
+    uint16_t rx_ts_ctrl_enable;
+    int ret;
 
     // Check port 0 RX frame timestamps from switch registers.
     // Port N RX timestamps are handled when frame is received from MAC.
-    while (deipce_rx_timestamp(dp, frame, &timestamp) == 0) {
-        deipce_handle_tx_timestamp(dp, &dp->rx_stamper, frame,
-                                   timestamp);
+
+    dev_ts_dbg(dp->this_dev, "RX: TS_CTRL 0x%x 0x%x %i check\n",
+               rx_ts_ctrl, 1u << dp->rx_stamper.next, dp->rx_stamper.next);
+
+    while (!(rx_ts_ctrl & (1u << dp->rx_stamper.next))) {
+        // Timestamp is available.
+        rx_ts_ctrl_enable = 1u << dp->rx_stamper.next;
+
+        // Avoid loop.
+        rx_ts_ctrl |= rx_ts_ctrl_enable;
+
+        dev_ts_dbg(dp->this_dev, "RX: TS_CTRL 0x%x 0x%x %i available\n",
+                   rx_ts_ctrl, rx_ts_ctrl_enable, dp->rx_stamper.next);
+
+        ret = deipce_rx_timestamp(dp, frame, &timestamp);
+
+        // Always enable timestamper.
+        deipce_write_switch_reg(dp, FRS_REG_TS_CTRL_RX, rx_ts_ctrl_enable);
+
+        if (ret == 0)
+            deipce_handle_tx_timestamp(dp, &dp->rx_stamper, frame, timestamp);
+
+        // Go to next entry.
+        dp->rx_stamper.next =
+            (dp->rx_stamper.next + 1) % FRS_TS_NUMBER_TIMESTAMPS;
     }
 
     return;
@@ -1263,6 +1277,9 @@ static void deipce_get_tx_timestamp(struct deipce_dev_priv *dp)
     uint8_t frame[FRS_TS_HDR_LEN] = { 0 };
     struct deipce_port_priv *port = NULL;
     unsigned int port_num = 0;
+    uint16_t tx_ts_ctrl;
+    uint16_t tx_ts_ctrl_enable;
+    int ret;
 
     // Check port N (N != 0) TX frame timestamps from port registers.
     // Port 0 TX timestamps are handled when frame is received from MAC.
@@ -1274,9 +1291,34 @@ static void deipce_get_tx_timestamp(struct deipce_dev_priv *dp)
         if (!(dp->features.ts_ports & (1u << port_num)))
             continue;
 
-        while (deipce_port_tx_timestamp(port, frame, &timestamp) == 0) {
-            deipce_handle_tx_timestamp(dp, &port->tx_stamper, frame,
-                                       timestamp);
+        tx_ts_ctrl = deipce_read_port_reg(port, PORT_REG_TS_CTRL_TX);
+
+        dev_ts_dbg(dp->this_dev, "%s TX: TS_CTRL 0x%x check\n",
+                   netdev_name(port->netdev), tx_ts_ctrl);
+
+        while (!(tx_ts_ctrl & (1u << port->tx_stamper.next))) {
+            // Timestamp is available.
+            tx_ts_ctrl_enable = 1u << port->tx_stamper.next;
+
+            // Avoid loop.
+            tx_ts_ctrl |= tx_ts_ctrl_enable;
+
+            dev_ts_dbg(dp->this_dev, "%s TX: TS_CTRL 0x%x 0x%x %i available\n",
+                       netdev_name(port->netdev),
+                       tx_ts_ctrl, tx_ts_ctrl_enable, port->tx_stamper.next);
+
+            ret = deipce_port_tx_timestamp(port, frame, &timestamp);
+
+            // Always enable timestamper.
+            deipce_write_port_reg(port, PORT_REG_TS_CTRL_TX, tx_ts_ctrl_enable);
+
+            if (ret == 0)
+                deipce_handle_tx_timestamp(dp, &port->tx_stamper, frame,
+                                           timestamp);
+
+            // Go to next entry.
+            port->tx_stamper.next =
+                (port->tx_stamper.next + 1) % PORT_TS_NUMBER_TIMESTAMPS;
         }
     }
 
@@ -1390,22 +1432,21 @@ static void deipce_interrupt_work(struct work_struct *work)
 
     deipce_write_switch_reg(dp, FRS_REG_INTSTAT, ~intstat);
 
-    if (deipce_dev_has_cpu_port(dp) && dp->phc.info) {
-        dp->irq_work_time_valid = false;
+    dp->irq_work_time_valid = false;
 
-        if (intstat & FRS_INT_RX_TSTAMP) {
-            // PTP event frame in RX frame timestamp registers.
-            dp->stats.rx_stamp++;
-            if (!dp->use_port_ts)
-                deipce_get_rx_timestamp(dp);
-        }
-        if (intstat & FRS_INT_TX_TSTAMP) {
-            // PTP event frame in TX frame timestamp registers.
-            dp->stats.tx_stamp++;
-            if (dp->use_port_ts)
-                deipce_get_tx_timestamp(dp);
-        }
+    if (intstat & FRS_INT_RX_TSTAMP) {
+        // PTP event frame in RX frame timestamp registers.
+        dp->stats.rx_stamp++;
+        if (!dp->use_port_ts)
+            deipce_get_rx_timestamp(dp);
     }
+    if (intstat & FRS_INT_TX_TSTAMP) {
+        // PTP event frame in TX frame timestamp registers.
+        dp->stats.tx_stamp++;
+        if (dp->use_port_ts)
+            deipce_get_tx_timestamp(dp);
+    }
+
     if (intstat & FRS_INT_RX_ERROR) {
         // RX error happened
         dp->stats.rx_error++;
@@ -1461,21 +1502,20 @@ static irqreturn_t deipce_interrupt(int irq, void *device)
 }
 
 /**
- * Initialize FRS interrupt handling.
- * @param dp FRS device privates.
+ * Initialize switch interrupt handling.
+ * @param dp Switch privates.
  */
 int deipce_irq_init(struct deipce_dev_priv *dp)
 {
     int ret;
 
-    // Allow operation without IRQ.
-    if (!dp->irq)
-        return 0;
+    dev_dbg(dp->this_dev, "%s() IRQ %u\n", __func__, dp->irq);
 
-    // We are interested in interrupts only if it has a CPU port,
-    // or port timestampers are in use.
-    if (!deipce_dev_has_cpu_port(dp) && !dp->use_port_ts)
+    if (!dp->irq) {
+        // Allow operation without IRQ.
+        dev_warn(dp->this_dev, "No IRQ defined\n");
         return 0;
+    }
 
     INIT_WORK(&dp->irq_work, &deipce_interrupt_work);
     ret = request_irq(dp->irq, &deipce_interrupt, IRQF_SHARED, DRV_NAME, dp);
@@ -1485,22 +1525,30 @@ int deipce_irq_init(struct deipce_dev_priv *dp)
         return ret;
     }
 
-    dev_printk(KERN_DEBUG, dp->this_dev, "IRQ %i allocated\n", dp->irq);
-
     return 0;
 }
 
 /**
- * Cleanup FRS interrupt handling.
- * @param dp FRS device privates.
+ * Enable interrupts from switch.
+ * @param dp Switch privates.
  */
-void deipce_irq_cleanup(struct deipce_dev_priv *dp)
+void deipce_irq_enable(struct deipce_dev_priv *dp)
 {
-    // Allow operation without IRQ.
     if (!dp->irq)
         return;
 
-    if (!deipce_dev_has_cpu_port(dp))
+    // Enable needed interrupts.
+    deipce_write_switch_reg(dp, FRS_REG_INTMASK, deipce_get_intmask(dp));
+    return;
+}
+
+/**
+ * Disable interrupts from switch.
+ * @param dp Switch privates.
+ */
+void deipce_irq_disable(struct deipce_dev_priv *dp)
+{
+    if (!dp->irq)
         return;
 
     dev_dbg(dp->this_dev, "%s()\n", __func__);
@@ -1511,13 +1559,26 @@ void deipce_irq_cleanup(struct deipce_dev_priv *dp)
     cancel_work_sync(&dp->irq_work);
     deipce_write_switch_reg(dp, FRS_REG_INTMASK, 0);
     deipce_write_switch_reg(dp, FRS_REG_INTSTAT, 0);
-    free_irq(dp->irq, dp);
 
     enable_irq(dp->irq);
 
-    // Just in case.
-    deipce_write_switch_reg(dp, FRS_REG_INTMASK, 0);
-    deipce_write_switch_reg(dp, FRS_REG_INTSTAT, 0);
+    dev_dbg(dp->this_dev, "%s() done\n", __func__);
+
+    return;
+}
+
+/**
+ * Cleanup switch interrupt handling.
+ * @param dp Switch privates.
+ */
+void deipce_irq_cleanup(struct deipce_dev_priv *dp)
+{
+    if (!dp->irq)
+        return;
+
+    dev_dbg(dp->this_dev, "%s()\n", __func__);
+
+    free_irq(dp->irq, dp);
 
     dev_dbg(dp->this_dev, "%s() done\n", __func__);
 
@@ -1535,13 +1596,6 @@ int deipce_netdevif_init(struct deipce_dev_priv *dp)
     int ret = -ENODEV;
 
     dev_dbg(dp->this_dev, "Init netdevif\n");
-
-    // Only register RX handlers for instances with CPU port.
-    if (!deipce_dev_has_cpu_port(dp)) {
-        dev_printk(KERN_DEBUG, dp->this_dev,
-                   "No CPU port, not registering rx handler\n");
-        return 0;
-    }
 
     // Register rx handler for underlying MAC netdevice.
     rtnl_lock();
@@ -1594,13 +1648,10 @@ void deipce_netdevif_cleanup(struct deipce_dev_priv *dp)
 
     dev_dbg(dp->this_dev, "%s()\n", __func__);
 
-    // Unregister rx handler for MAC netdevice
-    // Handlers are registered for devices with a CPU port only.
-    if (deipce_dev_has_cpu_port(dp)) {
-        rtnl_lock();
-        netdev_rx_handler_unregister(dp->real_netdev);
-        rtnl_unlock();
-    }
+    // Unregister rx handler for MAC netdevice.
+    rtnl_lock();
+    netdev_rx_handler_unregister(dp->real_netdev);
+    rtnl_unlock();
 
     deipce_netdevif_cleanup_stamper(&dp->rx_stamper);
 

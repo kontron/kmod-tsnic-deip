@@ -32,11 +32,31 @@
 #define FRS_CONFIG_ID_DS      0x0007
 
 /**
+ * FRS Switch Management Registers
+ */
+#define FRS_REG_SWITCH_MGMT             0x01000000
+
+/**
+ * FRS Port Control Registers
+ */
+#define FRS_REG_PORT_CTRL               0x00200000
+#define FRS_REG_PORT_CTRL_SIZE          0x00010000
+#define DEIPCE_PORT_CTRL_ADDR(base, port_num) \
+    ((base) - FRS_REG_SWITCH_MGMT + \
+     FRS_REG_PORT_CTRL + ((port_num)) * FRS_REG_PORT_CTRL_SIZE)
+
+/**
+ * FRS Switch Management Registers
+ */
+#define DEIPCE_SWITCH_MGMT_ADDR(base)   ((base) + 0)
+
+/**
  * FRS Switch Generics Registers
  */
-#define FRS_REG_GENERIC                 0x6000
+#define FRS_REG_GENERIC                 0xe000
 
 #define FRS_REG_GENERIC_PORT_HIGH       (FRS_REG_GENERIC + 0x000)
+#define FRS_REG_GENERIC_PORT_HIGH_MASK  0xf
 #define FRS_REG_GENERIC_COUNTERS        (FRS_REG_GENERIC + 0x002)
 #define FRS_REG_GENERIC_CT_PORTS        (FRS_REG_GENERIC + 0x004)
 #define FRS_REG_GENERIC_TS_PORTS        (FRS_REG_GENERIC + 0x006)
@@ -186,7 +206,7 @@
 /**
  * VLAN Configuration registers.
  */
-#define FRS_VLAN_BASE               0x2000
+#define FRS_VLAN_BASE               0x4000
 #define FRS_VLAN_CFG(id)            (FRS_VLAN_BASE + (id))
 #define FRS_VLAN_DISABLE(port,data) ((data) &= ~(1u << (port)))
 #define FRS_VLAN_ENABLE(port,data)  ((data) |= (1u << (port)))
@@ -231,8 +251,10 @@
  * FRS Port VLAN configuration register bits (PORT_VLAN & VLAN0_MAPPING).
  */
 #define PORT_VLAN_ID(id)          ((id) & 0xFFF)
-#define PORT_VLAN_PCP(pcp)        (((pcp) << 12) & 0x7000)
-#define PORT_VLAN_PCP_GET(x)      (((x) & 0x7000) >> 12)
+#define PORT_VLAN_PCP(pcp)        (((pcp) & PORT_VLAN_PCP_MAX) << 12)
+#define PORT_VLAN_PCP_GET(x)      (((x) >> 12) & PORT_VLAN_PCP_MAX)
+#define PORT_VLAN_PCP_MAX         0x7
+#define PORT_VLAN_PCP_MASK        PORT_VLAN_PCP(PORT_VLAN_PCP_MAX)
 #define PORT_VLAN_TAGGED          0x8000
 #define PORT_VLAN_UNTAGGED        0x0000
 

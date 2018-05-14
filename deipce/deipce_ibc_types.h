@@ -25,7 +25,6 @@
 #define DEIPCE_IBC_TYPES_H
 
 #include <linux/types.h>
-#include <linux/mutex.h>
 #include <linux/device.h>
 #include <linux/platform_device.h>
 #include <linux/io.h>
@@ -42,9 +41,6 @@ struct deipce_ibc_dev_priv {
     struct platform_device *pdev;       ///< IBC platform device
 
     void __iomem *ioaddr;               ///< memory mapped I/O address
-    struct mutex lock;                  ///< synchronize access and changes
-    /// selectable clocks
-    struct deipce_ibc_phc_info phc[DEIPCE_IBC_MAX_CLOCKS];
 };
 
 /**

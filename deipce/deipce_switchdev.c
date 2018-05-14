@@ -209,16 +209,20 @@ static int deipce_switchdev_set_ageing(struct deipce_dev_priv *dp)
                 np->switchdev.ageing_time, ageing_time);
     }
 
-    data = deipce_read_switch_reg(dp, FRS_REG_AGING);
-    data &= ~FRS_AGING_MASK;
-    data |= deipce_ageing_value(ageing_time);
+    if (dp->switchdev.ageing_time != ageing_time) {
+        dp->switchdev.ageing_time = ageing_time;
 
-    deipce_write_switch_reg(dp, FRS_REG_AGING, data);
+        data = deipce_read_switch_reg(dp, FRS_REG_AGING);
+        data &= ~FRS_AGING_MASK;
+        data |= deipce_ageing_value(ageing_time);
 
-    dev_dbg(dp->this_dev, "%s() Set ageing time %lu -> %u (%lu)\n",
-            __func__, ageing_time,
-            deipce_ageing_value(ageing_time),
-            deipce_ageing_time(deipce_ageing_value(ageing_time)));
+        deipce_write_switch_reg(dp, FRS_REG_AGING, data);
+
+        dev_dbg(dp->this_dev, "%s() Change ageing time to %lu -> %u (%lu)\n",
+                __func__, ageing_time,
+                deipce_ageing_value(ageing_time),
+                deipce_ageing_time(deipce_ageing_value(ageing_time)));
+    }
 
     return 0;
 }
@@ -364,9 +368,6 @@ static int deipce_switchdev_port_fdb_add(
     };
     uint16_t row = 0;
     uint16_t col = FRS_SMAC_TABLE_COLS;
-
-    if (dp->features.smac_rows == 0)
-        return -EOPNOTSUPP;
 
     // Keep VLAN ID always zero if VLAN match is not enabled.
     if (fdb->vid)
@@ -550,9 +551,6 @@ static int deipce_switchdev_port_fdb_del(
     };
     unsigned int col = 0;
 
-    if (dp->features.smac_rows == 0)
-        return -EOPNOTSUPP;
-
     netdev_dbg(netdev, "%s() DEL %pM VID %hu\n",
                __func__, fdb->addr, fdb->vid);
 
@@ -690,9 +688,6 @@ static int deipce_switchdev_port_fdb_dump(struct net_device *netdev,
     struct deipce_switchdev_fdb_entry *fdb_entry = NULL;
     int bkt;
 
-    if (dp->features.smac_rows == 0)
-        return -EOPNOTSUPP;
-
     netdev_dbg(netdev, "%s() DUMP\n", __func__);
 
     // Dump static FDB entries.
@@ -714,7 +709,7 @@ static int deipce_switchdev_port_fdb_dump(struct net_device *netdev,
                 continue;
 
             ether_addr_copy(fdb->addr, entry.mac_address);
-            fdb->ndm_state = NUD_REACHABLE;
+            fdb->ndm_state = NUD_REACHABLE | NUD_NOARP;
             if (entry.config & FRS_SMAC_CONFIG_VLAN)
                 fdb->vid = entry.vlan;
             else
@@ -730,20 +725,6 @@ static int deipce_switchdev_port_fdb_dump(struct net_device *netdev,
 
     if (ret)
         return ret;
-
-    // Dump learned FDB entries.
-    hash_for_each(dp->switchdev.fdb, bkt, fdb_entry, hlist) {
-        if (fdb_entry->key.port_num != pp->port_num)
-            continue;
-
-        ether_addr_copy(fdb->addr, fdb_entry->key.mac_address);
-        fdb->ndm_state = NUD_REACHABLE;
-        fdb->vid = 0;
-
-        ret = cb(&fdb->obj);
-        if (ret)
-            break;
-    }
 
     return ret;
 }
@@ -1202,17 +1183,13 @@ out:
 }
 
 /**
- * Initialize FES device for switchdev support.
- * @param dp FES device privates.
+ * Initialize switchdev functionality for switch.
+ * @param dp Switch privates.
  */
-int deipce_switchdev_init_device(struct deipce_dev_priv *dp)
+int deipce_switchdev_init_switch(struct deipce_dev_priv *dp)
 {
     struct netdev_phys_item_id phys_id = { .id_len = 0 };
-    struct deipce_port_priv *pp = NULL;
-    struct deipce_netdev_priv *np = NULL;
-    clock_t ageing_time = 0;
     uint16_t data;
-    unsigned int i;
 
     hash_init(dp->switchdev.fdb);
     INIT_DELAYED_WORK(&dp->switchdev.notify_fdb,
@@ -1225,25 +1202,31 @@ int deipce_switchdev_init_device(struct deipce_dev_priv *dp)
 
     // Record ageing time.
     data = deipce_read_switch_reg(dp, FRS_REG_AGING);
-    ageing_time = deipce_ageing_time(data & FRS_AGING_MASK);
-
-    for (i = 0; i < dp->num_of_ports; i++) {
-        pp = dp->port[i];
-        if (!pp)
-            continue;
-
-        np = netdev_priv(pp->netdev);
-        np->switchdev.ageing_time = ageing_time;
-    }
+    dp->switchdev.ageing_time = deipce_ageing_time(data & FRS_AGING_MASK);
 
     return 0;
 }
 
 /**
- * Cleanup FES device switchdev support.
- * @param dp FES device privates.
+ * Initialize switchdev functionality for switch port.
+ * @param dp Switch privates.
+ * @param pp Port privates.
  */
-void deipce_switchdev_cleanup_device(struct deipce_dev_priv *dp)
+int deipce_switchdev_init_port(struct deipce_dev_priv *dp,
+                               struct deipce_port_priv *pp)
+{
+    struct deipce_netdev_priv *np = netdev_priv(pp->netdev);
+
+    np->switchdev.ageing_time = dp->switchdev.ageing_time;
+
+    return 0;
+}
+
+/**
+ * Cleanup switchdev functionality for switch.
+ * @param dp Switch privates.
+ */
+void deipce_switchdev_cleanup_switch(struct deipce_dev_priv *dp)
 {
     struct deipce_switchdev_fdb_entry *fdb_entry = NULL;
     struct hlist_node *tmp = NULL;

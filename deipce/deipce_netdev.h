@@ -30,12 +30,18 @@
 /// Link check interval in jiffies
 #define DEIPCE_LINK_CHECK_INTERVAL (1*HZ)
 
-// Forward declarations
 struct sk_buff;
+struct deipce_cfg;
+struct deipce_port_cfg;
 
-int deipce_netdev_init(struct deipce_dev_priv *dp,
-                       struct deipce_cfg *frs_cfg);
-void deipce_netdev_cleanup(struct deipce_dev_priv *dp);
+int deipce_netdev_init_switch(struct deipce_dev_priv *dp,
+                              struct deipce_switch_config *config);
+int deipce_netdev_init_port(struct deipce_dev_priv *dp,
+                            struct deipce_port_priv *pp,
+                            struct deipce_port_config *config);
+void deipce_netdev_cleanup_switch(struct deipce_dev_priv *dp);
+void deipce_netdev_cleanup_port(struct deipce_dev_priv *dp,
+                                struct deipce_port_priv *pp);
 void deipce_rx_frame(struct sk_buff *rx_frame);
 int deipce_update_port_mode(struct net_device *netdev,
                             enum link_mode link_mode);

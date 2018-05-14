@@ -41,13 +41,12 @@
 
 #include "deipce_types.h"
 #include "deipce_if.h"
-#include "deipce_mmio.h"
 #include "deipce_netdev.h"
-#include "deipce_hw.h"
 #include "deipce_netdevif.h"
+#include "deipce_hw.h"
 #include "deipce_switchdev.h"
+#include "deipce_time.h"
 #include "deipce_clock_main.h"
-#include "deipce_clock_ptp.h"
 #include "deipce_fsc_main.h"
 #include "deipce_fpts_main.h"
 #include "deipce_ibc_main.h"
@@ -83,30 +82,6 @@ struct deipce_drv_priv *deipce_get_drv_priv(void)
 }
 
 /**
- * Init device private data.
- * @param dp Device private data
- * @param id Device id
- */
-static void init_dev_privates(struct deipce_dev_priv *dp, int id)
-{
-    struct deipce_drv_priv *drv = deipce_get_drv_priv();
-    int i;
-
-    dp->dev_num = id;
-    drv->dev_priv[id] = dp;
-
-    for (i = 0; i < ARRAY_SIZE(dp->port); i++) {
-        dp->port[i] = NULL;
-    }
-
-    spin_lock_init(&dp->rx_stamper.lock);
-    mutex_init(&dp->common_reg_lock);
-    mutex_init(&dp->smac_table_lock);
-
-    return;
-}
-
-/**
  * Read switch generic register value.
  * @param dp Switch privates.
  * @param reg Generic register to read.
@@ -125,11 +100,16 @@ static inline uint16_t deipce_read_generic(struct deipce_dev_priv *dp,
  * Set switch features from switch generics registers.
  * @param dp Switch privates.
  */
-static void deipce_read_switch_parameters(struct deipce_dev_priv *dp)
+static int deipce_read_switch_parameters(struct deipce_dev_priv *dp)
 {
     unsigned int column;
+    uint16_t value;
 
     dev_dbg(dp->this_dev, "%s() read generics\n", __func__);
+
+    dp->num_of_ports =
+        deipce_read_generic(dp, FRS_REG_GENERIC_PORT_HIGH,
+                            FRS_REG_GENERIC_PORT_HIGH_MASK) + 1;
 
     dp->features.mgmt_ports =
         deipce_read_generic(dp, FRS_REG_GENERIC_MGMT_PORTS,
@@ -162,12 +142,39 @@ static void deipce_read_switch_parameters(struct deipce_dev_priv *dp)
     dp->features.prio_queues =
         deipce_read_generic(dp, FRS_REG_GENERIC_PRIO_QUEUES,
                             FRS_REG_GENERIC_PRIO_QUEUES_MASK);
-    dp->features.policers = 1u <<
-        deipce_read_generic(dp, FRS_REG_GENERIC_POLICERS,
-                            FRS_REG_GENERIC_POLICERS_MASK);
-    dp->features.smac_rows = 1u <<
-        deipce_read_generic(dp, FRS_REG_GENERIC_SMAC_ROWS,
-                            FRS_REG_GENERIC_SMAC_ROWS_MASK);
+
+    // Number of policers is only valid when policing is enabled.
+    value = deipce_read_generic(dp, FRS_REG_GENERIC_POLICING,
+                                FRS_REG_GENERIC_POLICING_MASK);
+    if (value) {
+        dp->features.policers = 1u <<
+            deipce_read_generic(dp, FRS_REG_GENERIC_POLICERS,
+                                FRS_REG_GENERIC_POLICERS_MASK);
+        if (dp->features.policers < DEIPCE_MIN_POLICERS ||
+            dp->features.policers > DEIPCE_MAX_POLICERS) {
+            dev_err(dp->this_dev, "Number of policers %u is invalid\n",
+                    dp->features.policers);
+            return -EINVAL;
+        }
+    }
+    else {
+        dp->features.policers = 0;
+    }
+
+    // SMAC is required.
+    value = deipce_read_generic(dp, FRS_REG_GENERIC_SMAC_ROWS,
+                                FRS_REG_GENERIC_SMAC_ROWS_MASK);
+    if (!value) {
+        dev_err(dp->this_dev, "SMAC is required\n");
+        return -EINVAL;
+    }
+    dp->features.smac_rows = 1u << value;
+    if (dp->features.smac_rows < DEIPCE_MIN_SMAC_ROWS ||
+        dp->features.smac_rows > DEIPCE_MAX_SMAC_ROWS) {
+        dev_err(dp->this_dev, "Number of SMAC rows %u is invalid\n",
+                dp->features.smac_rows);
+        return -EINVAL;
+    }
 
     dp->features.flags = 0;
     if (deipce_read_generic(dp, FRS_REG_GENERIC_GIGABIT,
@@ -183,16 +190,196 @@ static void deipce_read_switch_parameters(struct deipce_dev_priv *dp)
     for (column = 0; column < FRS_SMAC_TABLE_COLS; column++)
         dp->smac.cfg.row_sel[column] = FLX_FRS_SMAC_ROW_SEL_NO_VLAN;
 
+    return 0;
+}
+
+/**
+ * Do a software reset to switch.
+ * @param dp Switch privates.
+ */
+static int deipce_sw_reset(struct deipce_dev_priv *dp)
+{
+    unsigned int timeout = 100;
+    uint16_t data;
+
+    // SW Reset
+    deipce_write_switch_reg(dp, FRS_REG_GEN, FRS_GEN_RESET);
+
+    /*
+     * Wait reset to complete. It may take up to a few hundred microseconds,
+     * depending on features. Have enough room for changes.
+     */
+    do {
+        if (timeout-- == 0) {
+            dev_err(dp->this_dev, "SW reset failed: timeout\n");
+            return -EBUSY;
+        }
+        usleep_range(100, 200);
+
+        data = deipce_read_switch_reg(dp, FRS_REG_GEN);
+    } while (data & FRS_GEN_RESET);
+
+    dev_printk(KERN_DEBUG, dp->this_dev, "SW reset done\n");
+
+    return 0;
+}
+
+/**
+ * Drop all VLAN memberships.
+ * @param dp Switch privates.
+ */
+void deipce_drop_all_vlans(struct deipce_dev_priv *dp)
+{
+    unsigned int vlan_id;
+
+    for (vlan_id = 0; vlan_id <= VLAN_VID_MASK; vlan_id++) {
+        deipce_write_switch_reg(dp, FRS_VLAN_CFG(vlan_id), 0);
+    }
+
     return;
 }
 
 /**
+ * Initialize switch registers.
+ * @param dp Switch privates.
+ */
+static void deipce_init_switch_registers(struct deipce_dev_priv *dp)
+{
+    uint16_t data = 0;
+
+    // Write general switch config, including management trailer settings.
+    if (dp->trailer_len > 1) {
+        data |= FRS_GEN_MGMT_TRAILER_LEN;
+        if (dp->trailer_offset > 0)
+            data |= FRS_GEN_MGMT_TRAILER_OFFSET;
+    }
+    deipce_write_switch_reg(dp, FRS_REG_GEN, data);
+
+    // Init timestampers.
+    if (!dp->use_port_ts) {
+        dp->tx_stamper = 0;
+        dp->rx_stamper.next = 0;
+        dp->rx_stamper.next_skb = 0;
+
+        deipce_write_switch_reg(dp, FRS_REG_TS_CTRL_RX,
+                                (1u << FRS_TS_NUMBER_TIMESTAMPS) - 1);
+        deipce_write_switch_reg(dp, FRS_REG_TS_CTRL_TX,
+                                (1u << FRS_TS_NUMBER_TIMESTAMPS) - 1);
+    }
+
+    // Make sure to use driver defaults for VLAN configuration.
+    deipce_drop_all_vlans(dp);
+
+    return;
+}
+
+/**
+ * Initialize port registers.
+ * @param dp Switch privates.
+ * @param pp Port privates.
+ */
+static void deipce_init_port_registers(struct deipce_dev_priv *dp,
+                                       struct deipce_port_priv *pp)
+{
+    uint16_t data;
+
+    /// Enable management trailer on CPU port.
+    if (pp->flags & DEIPCE_PORT_CPU) {
+        data = deipce_read_port_reg(pp, PORT_REG_STATE);
+        data |= PORT_STATE_MANAGEMENT;
+        deipce_write_port_reg(pp, PORT_REG_STATE, data);
+    }
+
+    // Init timestampers.
+    if (dp->use_port_ts && (dp->features.ts_ports & (1u << pp->port_num))) {
+        pp->rx_stamper = 0;
+        pp->tx_stamper.next = 0;
+        pp->tx_stamper.next_skb = 0;
+
+        deipce_write_port_reg(pp, PORT_REG_TS_CTRL_RX,
+                              (1u << PORT_TS_NUMBER_TIMESTAMPS) - 1);
+        deipce_write_port_reg(pp, PORT_REG_TS_CTRL_TX,
+                              (1u << PORT_TS_NUMBER_TIMESTAMPS) - 1);
+    }
+
+    deipce_reset_port_vlan_config(pp, true);
+
+    /*
+     * Use 1:1 mapping from VLAN PCP to output priority queue by default
+     * when there are enough queues.
+     */
+    if (dp->features.prio_queues == DEIPCE_MAX_PRIO_QUEUES) {
+        deipce_write_port_reg(pp, PORT_REG_VLAN_PRIO,
+                              PORT_VLAN_PRIO(0, 0) |
+                              PORT_VLAN_PRIO(1, 1) |
+                              PORT_VLAN_PRIO(2, 2) |
+                              PORT_VLAN_PRIO(3, 3) |
+                              PORT_VLAN_PRIO(4, 4) |
+                              PORT_VLAN_PRIO(5, 5) |
+                              PORT_VLAN_PRIO(6, 6) |
+                              PORT_VLAN_PRIO(7, 7));
+        deipce_write_port_reg(pp, PORT_REG_VLAN_PRIO_HI,
+                              PORT_VLAN_PRIO_HI(0, 0) |
+                              PORT_VLAN_PRIO_HI(1, 1) |
+                              PORT_VLAN_PRIO_HI(2, 2) |
+                              PORT_VLAN_PRIO_HI(3, 3) |
+                              PORT_VLAN_PRIO_HI(4, 4) |
+                              PORT_VLAN_PRIO_HI(5, 5) |
+                              PORT_VLAN_PRIO_HI(6, 6) |
+                              PORT_VLAN_PRIO_HI(7, 7));
+    }
+
+    return;
+}
+
+/**
+ * Read additional switch configuration from device tree.
+ * @param dp Switch privates.
+ * @param config Place for intermediate configuration time only information
+ * from device tree.
+ */
+static int deipce_config_switch_dt(struct deipce_dev_priv *dp,
+                                   struct deipce_switch_config *config)
+{
+    struct device_node *switch_node = dp->this_dev->of_node;
+    struct device_node *phc_node;
+
+    // Underlying Ethernet MAC name
+    if (of_property_read_string(switch_node, "mac_name", &config->mac_name)) {
+        dev_printk(KERN_DEBUG, dp->this_dev, "unable to get MAC name\n");
+        return -ENODEV;
+    }
+
+    // Default PTP hardware clock for all ports and endpoint
+    phc_node = of_parse_phandle(switch_node, "ptp-clock", 0);
+    if (phc_node) {
+        dp->time =
+            deipce_time_get_by_clock(deipce_clock_of_get_clock(phc_node));
+        of_node_put(phc_node);
+    }
+
+    // Time interface is mandatory.
+    if (!dp->time) {
+        dev_err(dp->this_dev, "No time interface\n");
+        return -ENODEV;
+    }
+
+    // Interface name for switch
+    if (of_property_read_string(switch_node, "if_name", &config->ep_name)) {
+        dev_dbg(dp->this_dev, "%s() Using default endpoint name\n", __func__);
+    }
+
+    return 0;
+}
+
+/**
  * Get PHY delays from device tree.
+ * @param dp Switch privates.
+ * @param pp Port privates.
  * @param node Device tree node with "phy-delay" property.
- * @param delay Array of delays, enum link_mode as array index.
  */
 static int deipce_of_get_phy_delays(struct deipce_dev_priv *dp,
-                                    struct deipce_port_cfg *port_cfg,
+                                    struct deipce_port_priv *pp,
                                     struct device_node *node)
 {
     // Triplettes of speed, TX-delay and RX-delay.
@@ -227,7 +414,7 @@ static int deipce_of_get_phy_delays(struct deipce_dev_priv *dp,
             return -EINVAL;
         }
 
-        delay = &port_cfg->phy_delay[link_mode];
+        delay = &pp->ext_phy.delay[link_mode];
         delay->tx = be32_to_cpu(values[value_index + 1]);
         delay->rx = be32_to_cpu(values[value_index + 2]);
 
@@ -237,220 +424,374 @@ static int deipce_of_get_phy_delays(struct deipce_dev_priv *dp,
         value_index += values_per_delay;
     }
 
-    port_cfg->phy_delay[LM_DOWN] = port_cfg->phy_delay[LM_10FULL];
+    pp->ext_phy.delay[LM_DOWN] = pp->ext_phy.delay[LM_10FULL];
 
     return 0;
 }
 
 /**
- * Configure FRS device.
- * @param dp FRS device privates.
- * @param pdev FRS platform_device.
- * @param frs_cfg Temporary storage for building FRS config.
+ * Read additional switch port configuration from device tree.
+ * @param dp Switch privates.
+ * @param pp Port privates.
+ * @param port_node Port device tree node.
+ * @param config Temporary storage to write port configuration to.
  */
-static int deipce_device_config(struct deipce_dev_priv *dp,
-                                struct platform_device *pdev,
-                                struct deipce_cfg *frs_cfg)
+static int deipce_config_port_dt(struct deipce_dev_priv *dp,
+                                 struct deipce_port_priv *pp,
+                                 struct device_node *port_node,
+                                 struct deipce_port_config *config)
 {
-    struct device *dev = &pdev->dev;
-    struct device_node *child_n = NULL;
-    const __be32 *reg = NULL;
-    int length = 0;
-    const char *svalue = NULL;
-    struct resource *irq_res =
-        platform_get_resource(pdev, IORESOURCE_IRQ, 0);
-    int ret = 0;
+    phy_interface_t phy_mode;
+    struct of_phandle_args args = { .np = NULL };
+    int ret;
+
+    dev_dbg(dp->this_dev, "%s() Configure port %u from device tree\n",
+            __func__, pp->port_num);
+
+    if (of_property_read_string(port_node, "if_name", &config->name) == 0) {
+        dev_dbg(dp->this_dev, "%s() Port %u name %s\n",
+                __func__, pp->port_num, config->name);
+    }
+
+    if (of_property_read_bool(port_node, "auto-speed-select")) {
+        pp->flags |= DEIPCE_PORT_SPEED_EXT;
+    }
+
+    // Ext PHY
+    pp->ext_phy.node = of_parse_phandle(port_node, "phy-handle", 0);
+    pp->ext_phy.interface = PHY_INTERFACE_MODE_NA;
+    if (pp->ext_phy.node) {
+        pp->medium_type = DEIPCE_MEDIUM_PHY;
+        pp->flags |= DEIPCE_HAS_PHY;
+
+        phy_mode = of_get_phy_mode(port_node);
+        if (phy_mode >= 0)
+            pp->ext_phy.interface = phy_mode;
+    }
+
+    // Ext PHY delays
+    ret = deipce_of_get_phy_delays(dp, pp, port_node);
+    if (ret) {
+        dev_warn(dp->this_dev, "Invalid PHY delays for port %u\n",
+                 pp->port_num);
+    }
+
+    // SFP EEPROM for SFP type detection
+    pp->sfp.eeprom_node = of_parse_phandle(port_node, "sfp-eeprom", 0);
+    if (pp->sfp.eeprom_node) {
+        pp->medium_type = DEIPCE_MEDIUM_SFP;
+        pp->flags |= DEIPCE_SFP_EEPROM;
+    }
+
+    // SFP PHY, always use SGMII with SFP PHY.
+    pp->sfp.phy.interface = PHY_INTERFACE_MODE_SGMII;
+    pp->sfp.phy.node = of_parse_phandle(port_node, "sfp-phy-handle", 0);
+    if (pp->sfp.phy.node) {
+        pp->medium_type = DEIPCE_MEDIUM_SFP;
+        pp->flags |= DEIPCE_HAS_SFP_PHY;
+    }
+
+    // SGMII mode for SGMII adapter
+    if (of_property_read_bool(port_node, "sgmii-phy-mode")) {
+        pp->flags |= DEIPCE_ADAPTER_SGMII_PHY_MODE;
+        dev_printk(KERN_DEBUG, dp->this_dev, "port %u SGMII %s mode\n",
+                   pp->port_num, "PHY");
+    }
+
+    if ((pp->flags & DEIPCE_HAS_PHY) &&
+        (pp->flags & DEIPCE_HAS_SFP_PHY))
+        pp->flags |= DEIPCE_HAS_SEPARATE_SFP;
+
+    if (dp->features.sched_ports & (1u << pp->port_num)) {
+        ret = of_parse_phandle_with_fixed_args(port_node, "scheduler", 1,
+                                               0, &args);
+        if (ret >= 0) {
+            struct device_node *node = args.np;
+
+            pp->sched.num = args.args[0];
+            pp->sched.fsc = deipce_fsc_of_get_device_by_node(node);
+            of_node_put(node);
+        }
+        else {
+            dev_info(dp->this_dev,
+                     "Disabling scheduled traffic support from port %u\n",
+                     pp->port_num);
+            dp->features.sched_ports &= ~(1u << pp->port_num);
+        }
+    }
+
+    return 0;
+}
+
+/**
+ * Create switch port.
+ * @param dp Switch privates.
+ * @param port_num Port number.
+ */
+static int deipce_create_port(struct deipce_dev_priv *dp,
+                              unsigned int port_num)
+{
+    struct deipce_port_priv *pp;
+    struct resource res_port = {
+        .start = DEIPCE_PORT_CTRL_ADDR(dp->base_addr, port_num),
+        .end = DEIPCE_PORT_CTRL_ADDR(dp->base_addr, port_num) +
+            FRS_REG_PORT_CTRL_SIZE - 1,
+    };
+    struct resource res_adapter = {
+        .start = 0,
+        .end = 0,
+    };
+    int ret = -ENOMEM;
+
+    pp = kmalloc(sizeof(*pp), GFP_KERNEL);
+    if (!pp) {
+        dev_err(dp->this_dev, "kmalloc failed\n");
+        goto err_alloc;
+    }
+
+    *pp = (struct deipce_port_priv){
+        .dp = dp,
+        .port_num = port_num,
+        .medium_type = DEIPCE_MEDIUM_NOPHY,
+        .sfp.supported = DEIPCE_ETHTOOL_SUPPORTED,
+        .mirror_port = -1,
+        .mgmt_tc = 1,
+
+        // Management trailer for sending.
+        .trailer = 1u << (dp->trailer_offset + port_num),
+    };
+
+    mutex_init(&pp->stats_lock);
+    mutex_init(&pp->port_reg_lock);
+    spin_lock_init(&pp->tx_stamper.lock);
+    dp->port[port_num] = pp;
+
+    if (!dp->cpu_port_mask && (dp->features.mgmt_ports & (1u << port_num))) {
+        dp->cpu_port_mask |= pp->trailer;
+        pp->flags |= DEIPCE_PORT_CPU;
+    }
+
+    if (dp->features.macsec_ports & (1u << pp->port_num))
+        pp->trailer |= deipce_get_macsec_trailer(dp);
+
+    pp->ioaddr = ioremap_nocache(res_port.start, resource_size(&res_port));
+    if (!pp->ioaddr) {
+        dev_err(dp->this_dev,
+                "ioremap failed for port %u at 0x%llx/0x%llx\n",
+                pp->port_num,
+                (unsigned long long int)res_port.start,
+                (unsigned long long int)resource_size(&res_port));
+        goto err_ioremap;
+    }
+
+    dev_printk(KERN_DEBUG, dp->this_dev,
+               "Port %u registers at 0x%llx/0x%llx\n",
+               pp->port_num,
+               (unsigned long long int)res_port.start,
+               (unsigned long long int)resource_size(&res_port));
+
+    // Adapter is optional.
+    if (res_adapter.start) {
+        pp->adapter.ioaddr =
+            ioremap_nocache(res_adapter.start, resource_size(&res_adapter));
+        if (!pp->adapter.ioaddr) {
+            dev_err(dp->this_dev,
+                    "ioremap failed for port %u adapter at 0x%llx/0x%llx\n",
+                    pp->port_num,
+                    (unsigned long long int)res_adapter.start,
+                    (unsigned long long int)resource_size(&res_adapter));
+            goto err_ioremap_adapter;
+        }
+
+        dev_printk(KERN_DEBUG, dp->this_dev,
+                   "Port %u adapter registers at 0x%llx/0x%llx\n",
+                   pp->port_num,
+                   (unsigned long long int)res_adapter.start,
+                   (unsigned long long int)resource_size(&res_adapter));
+    }
+
+    return 0;
+
+err_ioremap_adapter:
+    iounmap(pp->ioaddr);
+    pp->ioaddr = NULL;
+
+err_ioremap:
+    mutex_destroy(&pp->stats_lock);
+    mutex_destroy(&pp->port_reg_lock);
+    dp->port[pp->port_num] = NULL;
+    pp->dp = NULL;
+    kfree(pp);
+
+err_alloc:
+    return ret;
+}
+
+/**
+ * Initialize switch port for use.
+ * @param dp Switch privates.
+ * @param pp Port privates.
+ * @param port_node Port device tree node, or NULL.
+ */
+static int deipce_init_port(struct deipce_dev_priv *dp,
+                            struct deipce_port_priv *pp,
+                            struct device_node *port_node)
+{
+    struct deipce_port_config config = { .name = NULL };
+    int ret = -ENOMEM;
+
+    if (port_node) {
+        ret = deipce_config_port_dt(dp, pp, port_node, &config);
+        if (ret)
+            goto err_config;
+    }
+
+    deipce_init_port_registers(dp, pp);
+
+    ret = deipce_netdev_init_port(dp, pp, &config);
+    if (ret)
+        goto err_netdev;
+
+    ret = deipce_switchdev_init_port(dp, pp);
+    if (ret)
+        goto err_switchdev;
+
+    return 0;
+
+err_switchdev:
+    deipce_netdev_cleanup_port(dp, pp);
+
+err_netdev:
+err_config:
+    return ret;
+}
+
+/**
+ * Uninitialize switch port.
+ * @param dp Switch privates.
+ * @param pp Port privates.
+ */
+static void deipce_cleanup_port(struct deipce_dev_priv *dp,
+                                struct deipce_port_priv *pp)
+{
+    deipce_netdev_cleanup_port(dp, pp);
+
+    return;
+}
+
+/**
+ * Destroy uninitialized switch port.
+ * @param dp Switch privates.
+ * @param pp Port privates.
+ */
+static void deipce_destroy_port(struct deipce_dev_priv *dp,
+                                struct deipce_port_priv *pp)
+{
+    if (pp->adapter.ioaddr) {
+        iounmap(pp->adapter.ioaddr);
+        pp->adapter.ioaddr = NULL;
+    }
+
+    iounmap(pp->ioaddr);
+    pp->ioaddr = NULL;
+
+    mutex_destroy(&pp->stats_lock);
+    mutex_destroy(&pp->port_reg_lock);
+
+    dp->port[pp->port_num] = NULL;
+    pp->dp = NULL;
+    kfree(pp);
+
+    return;
+}
+
+/**
+ * Create switch.
+ * @param pdev Switch platform device.
+ */
+static int deipce_create_switch(struct platform_device *pdev)
+{
+    int ret = -ENXIO;
+    struct deipce_drv_priv *drv = deipce_get_drv_priv();
+    struct deipce_dev_priv *dp;
+    struct resource *res_mem = platform_get_resource(pdev, IORESOURCE_MEM, 0);
+    struct resource *res_irq = platform_get_resource(pdev, IORESOURCE_IRQ, 0);
+    unsigned int smac_usage_bits;
+    size_t smac_usage_size;
+    unsigned int port_num;
+    struct deipce_port_priv *pp;
+    unsigned int dev_num = 0;
+
+    dev_dbg(&pdev->dev, "%s() Create switch\n", __func__);
+
+    if (!res_mem) {
+        dev_err(&pdev->dev, "No I/O memory defined\n");
+        goto err_iomem;
+    }
+
+    // use pdev->id if provided, if only one, pdev->id == -1
+    if (pdev->id >= 0) {
+        dev_num = pdev->id;
+    } else {
+        // With device tree pdev->id may always be -1.
+        while (dev_num < ARRAY_SIZE(drv->dev_priv)) {
+            if (!drv->dev_priv[dev_num])
+                break;
+            dev_num++;
+        }
+    }
+    if (dev_num >= ARRAY_SIZE(drv->dev_priv)) {
+        dev_err(&pdev->dev, "Too many FRS devices\n");
+        ret = -ENODEV;
+        goto err_too_many;
+    }
+
+    dp = kmalloc(sizeof(*dp), GFP_KERNEL);
+    if (!dp) {
+        dev_err(&pdev->dev, "kmalloc failed\n");
+        goto err_alloc;
+    }
+
+    *dp = (struct deipce_dev_priv) {
+        .this_dev = &pdev->dev,
+        .dev_num = dev_num,
+        .tstamp_cfg = {
+            .tx_type = HWTSTAMP_TX_OFF,
+            .rx_filter = HWTSTAMP_FILTER_PTP_V2_L4_EVENT,
+        },
+        .base_addr = DEIPCE_SWITCH_MGMT_ADDR(res_mem->start),
+        .irq = res_irq ? res_irq->start : 0,
+    };
+
+    spin_lock_init(&dp->rx_stamper.lock);
+    mutex_init(&dp->common_reg_lock);
+    mutex_init(&dp->smac_table_lock);
+
+    drv->dev_priv[dev_num] = dp;
+
+    dp->ioaddr = ioremap_nocache(res_mem->start, resource_size(res_mem));
+    if (!dp->ioaddr) {
+        dev_err(dp->this_dev,
+                "ioremap failed for switch address 0x%llx/0x%llx\n",
+                (unsigned long long int)res_mem->start,
+                (unsigned long long int)resource_size(res_mem));
+        goto err_ioremap;
+    }
+
+    dev_printk(KERN_DEBUG, dp->this_dev,
+               "Switch registers at 0x%llx/0x%llx\n",
+               (unsigned long long int)res_mem->start,
+               (unsigned long long int)resource_size(res_mem));
+
+    ret = deipce_sw_reset(dp);
+    if (ret)
+        goto err_sw_reset;
 
     deipce_read_switch_parameters(dp);
 
-    if (!irq_res) {
-        // Allow operation without IRQ.
-        dev_warn(dp->this_dev, "No IRQ defined\n");
-        dp->irq = 0;
-    }
-    else {
-        dp->irq = irq_res->start;
-    }
-
-    // Underlying Ethernet MAC name
-    if (of_property_read_string(dev->of_node, "mac_name", &svalue)) {
-        dev_printk(KERN_DEBUG, dp->this_dev, "unable to get MAC name\n");
-        return -ENODEV;
-    }
-    frs_cfg->mac_name = svalue;
-
-    // Default PTP hardware clock for all ports and endpoint
-    frs_cfg->phc_node = of_parse_phandle(dev->of_node, "ptp-clock", 0);
-    if (frs_cfg->phc_node) {
-        dp->phc.info = deipce_clock_of_get_phc(frs_cfg->phc_node);
-        if (!dp->phc.info)
-            dev_warn(dp->this_dev, "Failed to get PHC\n");
-        dp->phc.index = deipce_clock_get_phc_index(dp->phc.info);
-        of_node_put(frs_cfg->phc_node);
-    }
-
-    frs_cfg->ibc_node = of_parse_phandle(dev->of_node, "ibc", 0);
-    if (frs_cfg->ibc_node) {
-        dp->ibc = deipce_ibc_of_get_device_by_node(frs_cfg->ibc_node);
-        if (!dp->ibc)
-            dev_warn(dp->this_dev, "Failed to get IBC\n");
-        of_node_put(frs_cfg->ibc_node);
-    }
-
-    // Interface name for switch
-    if (of_property_read_string(dev->of_node, "if_name", &svalue) == 0) {
-        frs_cfg->if_name = svalue;
-    }
-
-    // Config all ports
-    frs_cfg->num_of_ports = 0;
-    for_each_child_of_node(dev->of_node, child_n) {
-        struct deipce_port_cfg *port_cfg = NULL;
-        struct of_phandle_args args = { .np = NULL };
-        int port_num = -1;
-        int phy_mode = -1;
-
-        if (strncmp("port", child_n->name, 4) != 0) {
-            continue;
-        }
-
-        if (kstrtoint(child_n->name + 4, 10, &port_num) ||
-            port_num < 0 || port_num >= ARRAY_SIZE(frs_cfg->port)) {
-            dev_warn(dp->this_dev, "Invalid port %s\n",
-                     child_n->name);
-            continue;
-        }
-
-        port_cfg = &frs_cfg->port[port_num];
-
-        if (port_cfg->medium_type != DEIPCE_MEDIUM_NONE) {
-            dev_warn(dp->this_dev, "Already defined port %i\n",
-                     port_num);
-            continue;
-        }
-
-        if (dp->features.mgmt_ports & (1u << port_num))
-            port_cfg->flags |= DEIPCE_PORT_CPU;
-
-        dev_dbg(dp->this_dev, "Reading node %s index %i port %i\n",
-                child_n->name, port_num, port_num);
-
-        // Interface name for port
-        if (of_property_read_string(child_n, "if_name", &svalue) == 0) {
-            port_cfg->if_name = svalue;
-        }
-
-        if (of_property_read_bool(child_n, "auto-speed-select")) {
-            port_cfg->flags |= DEIPCE_PORT_SPEED_EXT;
-        }
-
-        // Port and port adapter register addresses
-        reg = of_get_property(child_n, "reg", &length);
-        if (!reg ||
-            (length != 2*sizeof(uint32_t) &&
-             length != 4*sizeof(uint32_t))) {
-            dev_printk(KERN_DEBUG, dp->this_dev,
-                       "unable to get port %i"
-                       " memory mapped I/O addresses\n",
-                       port_num);
-        } else {
-            port_cfg->baseaddr = be32_to_cpu(reg[0]);
-            if (length == 16) {
-                port_cfg->adapter_baseaddr = be32_to_cpu(reg[2]);
-                port_cfg->flags |=
-                    DEIPCE_PORT_ADDR_VALID |
-                    DEIPCE_ADAPTER_ADDR_VALID;
-            }
-            else {
-                port_cfg->flags |= DEIPCE_PORT_ADDR_VALID;
-            }
-        }
-
-        // Default medium type
-        port_cfg->medium_type = DEIPCE_MEDIUM_NOPHY;
-
-        // Ext PHY
-        port_cfg->ext_phy_node = of_parse_phandle(child_n,
-                                                  "phy-handle", 0);
-        port_cfg->ext_phy_if = PHY_INTERFACE_MODE_NA;
-        if (port_cfg->ext_phy_node) {
-            port_cfg->medium_type = DEIPCE_MEDIUM_PHY;
-            port_cfg->flags |= DEIPCE_HAS_PHY;
-
-            phy_mode = of_get_phy_mode(child_n);
-            if (phy_mode >= 0)
-                port_cfg->ext_phy_if = phy_mode;
-        }
-
-        // Ext PHY delays
-        ret = deipce_of_get_phy_delays(dp, port_cfg, child_n);
-        if (ret) {
-            dev_warn(dp->this_dev, "Invalid PHY delays for port %u\n",
-                     port_num);
-        }
-
-        // SFP EEPROM for SFP type detection
-        port_cfg->sfp_eeprom_node = of_parse_phandle(child_n,
-                                                     "sfp-eeprom", 0);
-        if (port_cfg->sfp_eeprom_node) {
-            port_cfg->medium_type = DEIPCE_MEDIUM_SFP;
-            port_cfg->flags |= DEIPCE_SFP_EEPROM;
-        }
-
-        // SFP PHY, always use SGMII with SFP PHY.
-        port_cfg->sfp_phy_if = PHY_INTERFACE_MODE_SGMII;
-        port_cfg->sfp_phy_node = of_parse_phandle(child_n,
-                                                  "sfp-phy-handle", 0);
-        if (port_cfg->sfp_phy_node) {
-            port_cfg->medium_type = DEIPCE_MEDIUM_SFP;
-            port_cfg->flags |= DEIPCE_HAS_SFP_PHY;
-        }
-
-        // SGMII mode for SGMII adapter
-        if (of_property_read_bool(child_n, "sgmii-phy-mode")) {
-            port_cfg->flags |= DEIPCE_ADAPTER_SGMII_PHY_MODE;
-            dev_printk(KERN_DEBUG, dp->this_dev,
-                       "port %i SGMII %s mode\n",
-                       port_num, "PHY");
-        }
-
-        if ((port_cfg->flags & DEIPCE_HAS_PHY) &&
-            (port_cfg->flags & DEIPCE_HAS_SFP_PHY))
-            port_cfg->flags |= DEIPCE_HAS_SEPARATE_SFP;
-
-        ret = of_parse_phandle_with_fixed_args(child_n, "scheduler", 1,
-                                               0, &args);
-        if (ret >= 0) {
-            port_cfg->fsc_node = args.np;
-            port_cfg->sched_num = args.args[0];
-            dp->features.sched_ports |= 1u << port_num;
-        }
-
-        if (port_num + 1 > frs_cfg->num_of_ports)
-            frs_cfg->num_of_ports = port_num + 1;
-    }
-
-    return 0;
-}
-
-/**
- * Initialize device port contexts using configuration information.
- * @param dp Device privates.
- * @param frs_cfg Device config.
- */
-static int deipce_init_ports(struct deipce_dev_priv *dp,
-                             struct deipce_cfg *frs_cfg)
-{
-    int i = 0;
-    struct deipce_port_priv *pp = NULL;
-    struct deipce_port_cfg *port_cfg = NULL;
-    struct deipce_ibc_phc_info phc_list[DEIPCE_IBC_MAX_CLOCKS] = {
-        { .info = NULL },
-    };
-    struct deipce_fsc_dev_priv *last_fsc = NULL;
-    unsigned int ibc_time_sel = dp->use_port_ts ? 1 : 0;
-
-    dp->num_of_ports = frs_cfg->num_of_ports;
+    ret = deipce_irq_init(dp);
+    if (ret)
+        goto err_irq;
 
     /*
      * Determine management trailer length.
@@ -469,311 +810,13 @@ static int deipce_init_ports(struct deipce_dev_priv *dp,
         dev_warn(dp->this_dev, "Too many ports\n");
     }
 
-    if (dp->ibc)
-        deipce_ibc_get_clocks(dp->ibc, phc_list, ARRAY_SIZE(phc_list),
-                              NULL, NULL);
-
-    for (i = 0; i < frs_cfg->num_of_ports; i++) {
-        port_cfg = &frs_cfg->port[i];
-
-        // Ignore unconfigured ports.
-        if (port_cfg->medium_type == DEIPCE_MEDIUM_NONE)
-            continue;
-
-        // Port addresses are required.
-        if (!(port_cfg->flags & DEIPCE_PORT_ADDR_VALID))
-            continue;
-
-        pp = kmalloc(sizeof(*pp), GFP_KERNEL);
-        if (!pp) {
-            dev_err(dp->this_dev, "kmalloc failed\n");
-            goto fail;
-        }
-
-        *pp = (struct deipce_port_priv){
-            .dp = dp,
-            .port_num = i,
-            .medium_type = port_cfg->medium_type,
-            .flags = port_cfg->flags,
-            .ext_phy.node = port_cfg->ext_phy_node,
-            .sfp.phy.node = port_cfg->sfp_phy_node,
-            .sfp.eeprom_node = port_cfg->sfp_eeprom_node,
-
-            .ext_phy.interface = port_cfg->ext_phy_if,
-            .sfp.phy.interface = port_cfg->sfp_phy_if,
-            .sfp.supported = DEIPCE_ETHTOOL_SUPPORTED,
-
-            .mgmt_prio =
-                PORT_ETH_ADDR_PRESERVE_PRIORITY |
-                PORT_ETH_ADDR_FROM_PRIO(0),
-            .rx_delay = 0,
-            .tx_delay = 0,
-            .p2p_delay = 0,
-
-            .sched = {
-                .fsc = deipce_fsc_of_get_device_by_node(port_cfg->fsc_node),
-                .num = port_cfg->sched_num,
-            },
-
-            // Management trailer for sending.
-            .trailer = 1u << i,
-        };
-
-        if (port_cfg->fsc_node) {
-            of_node_put(port_cfg->fsc_node);
-            if (pp->sched.fsc && pp->sched.fsc != last_fsc) {
-                deipce_fsc_set_clock(pp->sched.fsc,
-                                     phc_list[ibc_time_sel].info);
-                last_fsc = pp->sched.fsc;
-            }
-        }
-
-        if (!dp->cpu_port_mask && (pp->flags & DEIPCE_PORT_CPU))
-            dp->cpu_port_mask |= pp->trailer;
-
-        if (dp->features.macsec_ports & pp->trailer)
-            pp->trailer |= deipce_get_macsec_trailer(dp);
-
-        memcpy(pp->ext_phy.delay, port_cfg->phy_delay,
-               sizeof(port_cfg->phy_delay));
-
-        mutex_init(&pp->stats_lock);
-        mutex_init(&pp->port_reg_lock);
-        spin_lock_init(&pp->tx_stamper.lock);
-        dp->port[i] = pp;
-    }
-
-    return 0;
-
-fail:
-    for (i = 0; i < frs_cfg->num_of_ports; i++) {
-        if (dp->port[i]) {
-            kfree(dp->port[i]);
-            dp->port[i] = NULL;
-        }
-    }
-
-    return -ENOMEM;
-}
-
-/**
- * Do a software reset to switch.
- * @param dp Device privates.
- */
-static int deipce_sw_reset(struct deipce_dev_priv *dp)
-{
-    unsigned int timeout = 100;
-    uint16_t data;
-
-    // SW Reset
-    deipce_write_switch_reg(dp, FRS_REG_GEN, FRS_GEN_RESET);
-
-    // Wait reset to complete.
-    do {
-        if (timeout-- == 0) {
-            dev_err(dp->this_dev, "SW reset failed: timeout\n");
-            return -EBUSY;
-        }
-        cpu_relax();
-
-        data = deipce_read_switch_reg(dp, FRS_REG_GEN);
-    } while (data & FRS_GEN_RESET);
-
-    dev_printk(KERN_DEBUG, dp->this_dev, "SW reset done\n");
-
-    data &= ~FRS_GEN_TIME_TRAILER;
-    data &= ~(FRS_GEN_MGMT_TRAILER_LEN | FRS_GEN_MGMT_TRAILER_OFFSET);
-
-    if (dp->trailer_len > 1) {
-        data |= FRS_GEN_MGMT_TRAILER_LEN;
-        if (dp->trailer_offset > 0)
-            data |= FRS_GEN_MGMT_TRAILER_OFFSET;
-    }
-
-    deipce_write_switch_reg(dp, FRS_REG_GEN, data);
-
-    return 0;
-}
-
-/**
- * Drop all VLAN memberships.
- * @param dp Device privates.
- */
-void deipce_drop_all_vlans(struct deipce_dev_priv *dp)
-{
-    unsigned int vlan_id;
-
-    for (vlan_id = 0; vlan_id <= VLAN_VID_MASK; vlan_id++) {
-        deipce_write_switch_reg(dp, FRS_VLAN_CFG(vlan_id), 0);
-    }
-
-    return;
-}
-
-/**
- * Run SW reset and init default settings.
- * @param dp FRS device privates.
- */
-static int deipce_init_registers(struct deipce_dev_priv *dp)
-{
-    struct deipce_port_priv *port = NULL;
-    unsigned int port_num;
-    int ret = -ENODEV;
-
-    ret = deipce_sw_reset(dp);
-    if (ret)
-        return ret;
-
-    // Init timestampers.
-    if (dp->use_port_ts) {
-        for (port_num = 0; port_num < DEIPCE_MAX_PORTS; port_num++) {
-            if (!(dp->features.ts_ports & (1u << port_num)))
-                continue;
-
-            port = dp->port[port_num];
-            if (!port)
-                continue;
-
-            port->rx_stamper = 0;
-            port->tx_stamper.next = 0;
-            port->tx_stamper.next_skb = 0;
-
-            deipce_write_port_reg(port, PORT_REG_TS_CTRL_RX,
-                                  (1u << PORT_TS_NUMBER_TIMESTAMPS) - 1);
-            deipce_write_port_reg(port, PORT_REG_TS_CTRL_TX,
-                                  (1u << PORT_TS_NUMBER_TIMESTAMPS) - 1);
-        }
-    }
-    else if (deipce_dev_has_cpu_port(dp)) {
-        dp->tx_stamper = 0;
-        dp->rx_stamper.next = 0;
-        dp->rx_stamper.next_skb = 0;
-
-        deipce_write_switch_reg(dp, FRS_REG_TS_CTRL_RX,
-                                (1u << FRS_TS_NUMBER_TIMESTAMPS) - 1);
-        deipce_write_switch_reg(dp, FRS_REG_TS_CTRL_TX,
-                                (1u << FRS_TS_NUMBER_TIMESTAMPS) - 1);
-    }
-
-    // Enable needed interrupts.
-    deipce_write_switch_reg(dp, FRS_REG_INTMASK, deipce_get_intmask(dp));
-
-    // Make sure to use driver defaults for VLAN configuration.
-    deipce_drop_all_vlans(dp);
-
-    for (port_num = 0; port_num < dp->num_of_ports; port_num++) {
-        port = dp->port[port_num];
-        if (!port)
-            continue;
-
-        deipce_reset_port_vlan_config(port, true);
-
-        /*
-         * Use 1:1 mapping from VLAN PCP to output priority queue by default
-         * when there are enough queues.
-         */
-        if (dp->features.prio_queues == DEIPCE_MAX_PRIO_QUEUES) {
-            deipce_write_port_reg(port, PORT_REG_VLAN_PRIO,
-                                  PORT_VLAN_PRIO(0, 0) |
-                                  PORT_VLAN_PRIO(1, 1) |
-                                  PORT_VLAN_PRIO(2, 2) |
-                                  PORT_VLAN_PRIO(3, 3) |
-                                  PORT_VLAN_PRIO(4, 4) |
-                                  PORT_VLAN_PRIO(5, 5) |
-                                  PORT_VLAN_PRIO(6, 6) |
-                                  PORT_VLAN_PRIO(7, 7));
-            deipce_write_port_reg(port, PORT_REG_VLAN_PRIO_HI,
-                                  PORT_VLAN_PRIO_HI(0, 0) |
-                                  PORT_VLAN_PRIO_HI(1, 1) |
-                                  PORT_VLAN_PRIO_HI(2, 2) |
-                                  PORT_VLAN_PRIO_HI(3, 3) |
-                                  PORT_VLAN_PRIO_HI(4, 4) |
-                                  PORT_VLAN_PRIO_HI(5, 5) |
-                                  PORT_VLAN_PRIO_HI(6, 6) |
-                                  PORT_VLAN_PRIO_HI(7, 7));
-        }
-    }
-
-    return 0;
-}
-
-/**
- * Function to initialise FRS platform devices.
- * @param pdev Platform device
- * @return 0 on success or negative error code.
- */
-static int deipce_device_init(struct platform_device *pdev)
-{
-    int ret = -ENOMEM;
-    struct deipce_drv_priv *drv = deipce_get_drv_priv();
-    struct deipce_dev_priv *dp = NULL;
-    struct deipce_cfg *frs_cfg = NULL;
-    uint32_t pdev_id = 0;
-
-    dev_dbg(&pdev->dev, "Init device\n");
-
-    frs_cfg = kmalloc(sizeof(*frs_cfg), GFP_KERNEL);
-    if (!frs_cfg) {
-        dev_err(&pdev->dev, "kmalloc failed\n");
-        return -ENOMEM;
-    }
-    *frs_cfg = (struct deipce_cfg){
-        .mac_name = NULL,
-    };
-
-    // use pdev->id if provided, if only one, pdev->id == -1
-    if (pdev->id >= 0) {
-        pdev_id = pdev->id;
-    } else {
-        // With device tree pdev->id may always be -1.
-        while (pdev_id < ARRAY_SIZE(drv->dev_priv)) {
-            if (!drv->dev_priv[pdev_id])
-                break;
-            pdev_id++;
-        }
-    }
-    if (pdev_id >= ARRAY_SIZE(drv->dev_priv)) {
-        dev_err(&pdev->dev, "Too many FRS devices\n");
-        ret = -ENODEV;
-        goto err_too_many;
-    }
-    // Allocate device private
-    dp = kmalloc(sizeof(*dp), GFP_KERNEL);
-    if (!dp) {
-        dev_err(&pdev->dev, "kmalloc failed\n");
+    smac_usage_bits = dp->features.smac_rows * FRS_SMAC_TABLE_COLS;
+    smac_usage_size = BITS_TO_LONGS(smac_usage_bits) * sizeof(*dp->smac.used);
+    dp->smac.used = kzalloc(smac_usage_size, GFP_KERNEL);
+    if (!dp->smac.used) {
+        dev_err(dp->this_dev, "Failed to allocate SMAC usage bitmap\n");
         ret = -ENOMEM;
-        goto err_alloc;
-    }
-
-    *dp = (struct deipce_dev_priv) {
-        .this_dev = &pdev->dev,
-        .dev_num = pdev_id,
-        .tstamp_cfg = {
-            .tx_type = HWTSTAMP_TX_OFF,
-            .rx_filter = HWTSTAMP_FILTER_PTP_V2_L4_EVENT,
-        },
-    };
-    init_dev_privates(dp, pdev_id);
-
-    ret = deipce_mmio_init_switch(dp, pdev, frs_cfg);
-    if (ret)
-        goto err_reg_access;
-
-    ret = deipce_device_config(dp, pdev, frs_cfg);
-    if (ret) {
-        dev_err(dp->this_dev, "Failed to configure device\n");
-        goto err_device_config;
-    }
-
-    if (dp->features.smac_rows > 0) {
-        unsigned int bits = dp->features.smac_rows * FRS_SMAC_TABLE_COLS;
-        size_t alloc_size = BITS_TO_LONGS(bits) * sizeof(*dp->smac.used);
-        dp->smac.used = kzalloc(alloc_size, GFP_KERNEL);
-        if (!dp->smac.used) {
-            dev_err(dp->this_dev, "Failed to allocate SMAC usage bitmap\n");
-            ret = -ENOMEM;
-            goto err_smac;
-        }
+        goto err_smac;
     }
 
     // Allow use of port timestampers only when they are available.
@@ -783,41 +826,127 @@ static int deipce_device_init(struct platform_device *pdev)
         dp->use_port_ts = true;
     else
         dp->use_port_ts = false;
-    if (dp->ibc) {
-        unsigned int time_sel = dp->use_port_ts ? 1 : 0;
-        unsigned int gp_sel = dp->use_port_ts ? 1 : 0;
 
-        deipce_ibc_set(dp->ibc, time_sel, gp_sel);
-        // FSC clock is set in deipce_init_ports.
+    for (port_num = 0; port_num < dp->num_of_ports; port_num++) {
+        ret = deipce_create_port(dp, port_num);
+        if (ret)
+            goto err_port;
     }
 
-    ret = deipce_init_ports(dp, frs_cfg);
-    if (ret)
-        goto err_init_ports;
+    return 0;
 
-    ret = deipce_mmio_init_ports(dp, frs_cfg);
-    if (ret)
-        goto err_port_reg_access;
+err_port:
+    while (port_num-- > 0) {
+        pp = dp->port[port_num];
+        if (pp)
+            deipce_destroy_port(dp, pp);
+    }
+    if (dp->smac.used) {
+        kfree(dp->smac.used);
+        dp->smac.used = NULL;
+    }
 
-    ret = deipce_irq_init(dp);
-    if (ret)
-        goto err_irq;
+err_smac:
+    deipce_irq_cleanup(dp);
 
-    ret = deipce_init_registers(dp);
-    if (ret)
-        goto err_registers;
+err_irq:
+err_sw_reset:
+    iounmap(dp->ioaddr);
+    dp->ioaddr = NULL;
 
-    ret = deipce_netdev_init(dp, frs_cfg);
+err_ioremap:
+    drv->dev_priv[dev_num] = NULL;
+    kfree(dp);
+
+err_alloc:
+err_too_many:
+err_iomem:
+    return ret;
+}
+
+/**
+ * Platform driver probe function for DE-IP Core Edge.
+ * @param pdev Switch platform device.
+ */
+static int deipce_probe(struct platform_device *pdev)
+{
+    int ret;
+
+    ret = deipce_create_switch(pdev);
+
+    return ret;
+}
+
+/**
+ * Initialize switch for use.
+ * @param dp Switch privates.
+ */
+static int deipce_init_switch(struct deipce_dev_priv *dp)
+{
+    int ret = -ENOMEM;
+    struct deipce_switch_config config = { .mac_name = NULL };
+    unsigned int port_num = 0;
+    // "port%u"
+    char port_node_name[8];
+    struct device_node *port_node;
+    struct deipce_port_priv *pp;
+    struct deipce_fsc_dev_priv *last_fsc = NULL;
+    int wrk_phc = -1;
+
+    dev_dbg(dp->this_dev, "%s() Init switch\n", __func__);
+
+    ret = deipce_config_switch_dt(dp, &config);
+    if (ret)
+        goto err_config_switch_dt;
+
+    // Allow use of port timestampers only when they are available.
+    if (dp->features.ts_ports == 0)
+        port_ts &= ~(1u << dp->dev_num);
+    if (port_ts & (1u << dp->dev_num)) {
+        dp->use_port_ts = true;
+        // Use also 2nd PHC for worker clock by default if possible.
+        wrk_phc = deipce_time_get_avail_phc(dp->time, 1);
+    }
+    else {
+        dp->use_port_ts = false;
+    }
+    if (wrk_phc < 0)
+        wrk_phc = deipce_time_get_avail_phc(dp->time, 0);
+    deipce_time_set_phc(dp->time, DEIPCE_TIME_SEL_WRK, wrk_phc);
+
+    deipce_init_switch_registers(dp);
+
+    ret = deipce_switchdev_init_switch(dp);
+    if (ret)
+        goto err_switchdev;
+
+    ret = deipce_netdev_init_switch(dp, &config);
     if (ret)
         goto err_netdev;
 
-    ret = deipce_netdevif_init(dp);
-    if (ret)
-        goto err_netdevif;
+    for (port_num = 0; port_num < dp->num_of_ports; port_num++) {
+        pp = dp->port[port_num];
+        if (!pp)
+            continue;
 
-    ret = deipce_switchdev_init_device(dp);
-    if (ret)
-        goto err_switchdev;
+        sprintf(port_node_name, "port%u", port_num);
+        port_node = of_get_child_by_name(dp->this_dev->of_node,
+                                         port_node_name);
+        ret = deipce_init_port(dp, pp, port_node);
+
+        if (port_node)
+            of_node_put(port_node);
+
+        if (ret)
+            goto err_port;
+
+        if (pp->sched.fsc && pp->sched.fsc != last_fsc) {
+            deipce_fsc_set_time(pp->sched.fsc, dp->time);
+            last_fsc = pp->sched.fsc;
+        }
+    }
+
+    deipce_irq_enable(dp);
 
     ret = deipce_debugfs_init_device(dp);
     if (ret)
@@ -826,77 +955,80 @@ static int deipce_device_init(struct platform_device *pdev)
     return 0;
 
 err_debugfs:
-err_switchdev:
-    deipce_netdevif_cleanup(dp);
-
-err_netdevif:
-    deipce_netdev_cleanup(dp);
+    deipce_netdev_cleanup_switch(dp);
 
 err_netdev:
-err_registers:
-    deipce_irq_cleanup(dp);
+err_port:
+    while (port_num-- > 0) {
+        pp = dp->port[port_num];
+        if (!pp)
+            continue;
 
-err_irq:
-    deipce_mmio_cleanup_ports(dp);
-
-err_port_reg_access:
-err_init_ports:
-    if (dp->smac.used) {
-        kfree(dp->smac.used);
-        dp->smac.used = NULL;
+        deipce_cleanup_port(dp, pp);
     }
+    deipce_switchdev_cleanup_switch(dp);
 
-err_smac:
-err_device_config:
-    deipce_mmio_cleanup_switch(dp);
-
-err_reg_access:
-    drv->dev_priv[pdev_id] = NULL;
-    kfree(dp);
-
-err_alloc:
-err_too_many:
-    kfree(frs_cfg);
-
+err_switchdev:
+err_config_switch_dt:
     return ret;
 }
 
 /**
- * Function to clean device data
+ * Uninitialize switch.
+ * @param dp Switch privates.
  */
-static void deipce_device_cleanup(struct deipce_dev_priv *dp)
+static void deipce_cleanup_switch(struct deipce_dev_priv *dp)
+{
+    struct deipce_port_priv *pp;
+    unsigned int port_num;
+
+    dev_dbg(dp->this_dev, "%s()\n", __func__);
+
+    deipce_debugfs_cleanup_device(dp);
+
+    deipce_irq_disable(dp);
+
+    for (port_num = 0; port_num < ARRAY_SIZE(dp->port); port_num++) {
+        pp = dp->port[port_num];
+        if (pp)
+            deipce_cleanup_port(dp, pp);
+    }
+
+    deipce_netdev_cleanup_switch(dp);
+    deipce_switchdev_cleanup_switch(dp);
+
+    dev_dbg(dp->this_dev, "%s() done\n", __func__);
+
+    return;
+}
+
+/**
+ * Release all resources used by switch.
+ * @param dp Switch privates.
+ */
+static void deipce_destroy_switch(struct deipce_dev_priv *dp)
 {
     struct deipce_drv_priv *drv = deipce_get_drv_priv();
-    unsigned int i;
+    struct deipce_port_priv *pp;
+    unsigned int port_num;
 
     dev_dbg(dp->this_dev, "%s()\n", __func__);
 
     deipce_irq_cleanup(dp);
-    deipce_debugfs_cleanup_device(dp);
-    deipce_switchdev_cleanup_device(dp);
-    deipce_netdevif_cleanup(dp);
-    deipce_netdev_cleanup(dp);
+
+    for (port_num = 0; port_num < ARRAY_SIZE(dp->port); port_num++) {
+        pp = dp->port[port_num];
+        if (pp)
+            deipce_destroy_port(dp, pp);
+    }
 
     if (dp->smac.used) {
         kfree(dp->smac.used);
         dp->smac.used = NULL;
     }
 
-    deipce_mmio_cleanup_ports(dp);
-    deipce_mmio_cleanup_switch(dp);
-
-    for (i = 0; i < ARRAY_SIZE(dp->port); i++) {
-        struct deipce_port_priv *pp = dp->port[i];
-
-        if (!pp)
-            continue;
-
-        mutex_destroy(&pp->stats_lock);
-        mutex_destroy(&pp->port_reg_lock);
-
-        pp->dp = NULL;
-        kfree(pp);
-    }
+    iounmap(dp->ioaddr);
+    dp->ioaddr = NULL;
 
     drv->dev_priv[dp->dev_num] = NULL;
 
@@ -912,17 +1044,16 @@ static void deipce_device_cleanup(struct deipce_dev_priv *dp)
 }
 
 /**
- * Function to remove FRS platform devices.
- * @param pdev Platform device
- * @return 0 on success or negative error code.
+ * Platform driver remove function for DE-IP Core Edge.
+ * @param pdev Switch platform device
  */
-static int deipce_device_remove(struct platform_device *pdev)
+static int deipce_remove(struct platform_device *pdev)
 {
     struct deipce_drv_priv *drv = deipce_get_drv_priv();
     struct deipce_dev_priv *dp = NULL;
     unsigned int i;
 
-    printk(KERN_DEBUG DRV_NAME ": Remove device %s\n", dev_name(&pdev->dev));
+    dev_printk(KERN_DEBUG, &pdev->dev, "Remove device\n");
 
     for (i = 0; i < ARRAY_SIZE(drv->dev_priv); i++) {
         dp = drv->dev_priv[i];
@@ -930,7 +1061,8 @@ static int deipce_device_remove(struct platform_device *pdev)
             continue;
 
         if (dp->this_dev == &pdev->dev) {
-            deipce_device_cleanup(dp);
+            deipce_cleanup_switch(dp);
+            deipce_destroy_switch(dp);
             return 0;
         }
     }
@@ -938,6 +1070,55 @@ static int deipce_device_remove(struct platform_device *pdev)
     pr_err(DRV_NAME ": Device %s not found\n", dev_name(&pdev->dev));
 
     return -ENODEV;
+}
+
+/**
+ * Initialize all detected DE-IP Core Edge switches for use.
+ */
+static int deipce_init_switches(void)
+{
+    int ret = -ENODEV;
+    struct deipce_drv_priv *drv = deipce_get_drv_priv();
+    struct deipce_dev_priv *dp;
+    unsigned int dev_num;
+
+    pr_debug(DRV_NAME ": %s() Init switches\n", __func__);
+
+    for (dev_num = 0; dev_num < ARRAY_SIZE(drv->dev_priv); dev_num++) {
+        dp = drv->dev_priv[dev_num];
+        if (!dp)
+            continue;
+
+        ret = deipce_init_switch(dp);
+        if (ret) {
+            dev_warn(dp->this_dev, "Failed to initialize switch\n");
+            // Leave only fully initialized switches.
+            deipce_destroy_switch(dp);
+        }
+    }
+
+    return 0;
+}
+
+/**
+ * Cleanup and destroy all DE-IP Core Edge switches.
+ */
+static void deipce_destroy_switches(void)
+{
+    struct deipce_drv_priv *drv = deipce_get_drv_priv();
+    struct deipce_dev_priv *dp;
+    unsigned int dev_num;
+
+    for (dev_num = 0; dev_num < ARRAY_SIZE(drv->dev_priv); dev_num++) {
+        dp = drv->dev_priv[dev_num];
+        if (!dp)
+            continue;
+
+        deipce_cleanup_switch(dp);
+        deipce_destroy_switch(dp);
+    }
+
+    return;
 }
 
 /*
@@ -957,13 +1138,13 @@ static struct platform_driver deipce_dev_driver = {
         .owner = THIS_MODULE,
         .of_match_table = deipce_match,
     },
-    .probe = &deipce_device_init,
-    .remove = &deipce_device_remove,
+    .probe = &deipce_probe,
+    .remove = &deipce_remove,
 };
 
 /**
  * Module init.
- * @return 0 if success.
+ * Initialize everything in correct order.
  */
 static int __init deipce_init(void)
 {
@@ -974,32 +1155,15 @@ static int __init deipce_init(void)
     if (ret)
         goto err_init_debugfs;
 
+    deipce_time_init_driver();
+
     /*
      * Ordering dependencies:
+     * - switch must be reset first
      * - clock depends on FPTS
      * - FSC depends on clock
      * - IBC depends on clocks
      */
-    ret = deipce_fpts_init_driver();
-    if (ret) {
-        pr_warn(DRV_NAME ": Failed to initialize FPTS driver\n");
-        // We can work without.
-    }
-    ret = deipce_clock_init_driver();
-    if (ret) {
-        pr_warn(DRV_NAME ": Failed to initialize clock driver\n");
-        // We can work without.
-    }
-    ret = deipce_fsc_init_driver();
-    if (ret) {
-        pr_warn(DRV_NAME ": Failed to initialize FSC driver\n");
-        // We can work without.
-    }
-    ret = deipce_ibc_init_driver();
-    if (ret) {
-        pr_warn(DRV_NAME ": Failed to initialize IBC driver\n");
-        // We can work without.
-    }
 
     ret = deipce_init_crc40(drv);
     if (ret)
@@ -1022,6 +1186,30 @@ static int __init deipce_init(void)
     ret = platform_driver_register(&deipce_dev_driver);
     if (ret)
         goto err_reg_driver;
+    ret = deipce_fpts_init_driver();
+    if (ret) {
+        pr_warn(DRV_NAME ": Failed to initialize FPTS driver\n");
+        // We can work without.
+    }
+    ret = deipce_clock_init_driver();
+    if (ret) {
+        pr_warn(DRV_NAME ": Failed to initialize clock driver\n");
+        // We can work without.
+    }
+    ret = deipce_fsc_init_driver();
+    if (ret) {
+        pr_warn(DRV_NAME ": Failed to initialize FSC driver\n");
+        // We can work without.
+    }
+    ret = deipce_ibc_init_driver();
+    if (ret) {
+        pr_warn(DRV_NAME ": Failed to initialize IBC driver\n");
+        // We can work without.
+    }
+
+    ret = deipce_init_switches();
+    if (ret)
+        goto err_init_switches;
 
     ret = deipce_switchdev_init_driver();
     if (ret)
@@ -1030,6 +1218,14 @@ static int __init deipce_init(void)
     return 0;
 
 err_init_switchdev:
+    deipce_destroy_switches();
+
+err_init_switches:
+    deipce_ibc_cleanup_driver();
+    deipce_fsc_cleanup_driver();
+    deipce_clock_cleanup_driver();
+    deipce_fpts_cleanup_driver();
+
 err_reg_driver:
     destroy_workqueue(drv->wq_high);
     drv->wq_high = NULL;
@@ -1042,10 +1238,6 @@ err_workqueue_lowpri:
     deipce_cleanup_crc40(drv);
 
 err_init_crc40:
-    deipce_ibc_cleanup_driver();
-    deipce_fsc_cleanup_driver();
-    deipce_clock_cleanup_driver();
-    deipce_fpts_cleanup_driver();
     deipce_debugfs_cleanup_driver(drv);
 
 err_init_debugfs:
@@ -1053,8 +1245,8 @@ err_init_debugfs:
 }
 
 /**
- * Module exit.
- * Cleanup everything.
+ * Module exit function.
+ * Cleanup everything in correct order.
  */
 static void __exit deipce_cleanup(void)
 {

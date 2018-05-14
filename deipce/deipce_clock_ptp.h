@@ -31,20 +31,7 @@
 int flx_frtc_ptp_init(struct flx_frtc_dev_priv *dp);
 int flx_frtc_ptp_init_devxtstamp(struct flx_frtc_dev_priv *dp);
 void flx_frtc_ptp_cleanup(struct flx_frtc_dev_priv *dp);
-struct ptp_clock_info *deipce_clock_of_get_phc(struct device_node *node);
-int deipce_clock_get_phc_index(struct ptp_clock_info *phc);
-
-static inline void deipce_clock_get_step_size(struct ptp_clock_info *phc,
-                                              uint32_t *step_nsec,
-                                              uint32_t *step_subnsec)
-{
-    struct flx_frtc_dev_priv *dp =
-        container_of(phc, struct flx_frtc_dev_priv, ptp_info);
-
-    *step_nsec = dp->step_nsec;
-    *step_subnsec = dp->step_subnsec;
-    return;
-}
+int deipce_clock_get_phc_index(struct flx_frtc_dev_priv *dp);
 
 #else
 
@@ -67,7 +54,7 @@ static inline struct ptp_clock_info *deipce_clock_of_get_phc(
     return NULL;
 }
 
-static inline int deipce_clock_get_phc_index(struct ptp_clock_info *phc)
+static inline int deipce_clock_get_phc_index(struct flx_frtc_dev_priv *dp)
 {
     return -1;
 }

@@ -33,7 +33,8 @@
 #include <linux/of.h>
 
 #include "deipce_main.h"
-#include "deipce_clock_ptp.h"
+#include "deipce_clock_main.h"
+#include "deipce_time.h"
 #include "deipce_fsc_types.h"
 #include "deipce_fsc_hw.h"
 #include "deipce_fsc_if.h"
@@ -73,45 +74,14 @@ struct deipce_fsc_dev_priv *deipce_fsc_of_get_device_by_node(
  * @param dp Device privates.
  * @param phc PHC clock which is in use for this FSC.
  */
-int deipce_fsc_set_clock(struct deipce_fsc_dev_priv *dp,
-                         struct ptp_clock_info *phc)
+int deipce_fsc_set_time(struct deipce_fsc_dev_priv *dp,
+                        struct deipce_time *dt)
 {
     mutex_lock(&dp->lock);
 
-    dp->phc = phc;
+    dp->time = dt;
 
     mutex_unlock(&dp->lock);
-
-    return 0;
-}
-
-/**
- * Init MMIO register access.
- * @param dp Device privates
- * @return 0 on success.
- */
-static int deipce_fsc_mmio_init_device(struct deipce_fsc_dev_priv *dp)
-{
-    struct resource *res = platform_get_resource(dp->pdev, IORESOURCE_MEM, 0);
-
-    if (!res) {
-        dev_err(&dp->pdev->dev, "No I/O memory defined\n");
-        return -ENXIO;
-    }
-
-    dp->ioaddr = ioremap_nocache(res->start, resource_size(res));
-    if (!dp->ioaddr) {
-        dev_printk(KERN_WARNING, &dp->pdev->dev,
-                   ": ioremap failed for device address 0x%llx/0x%llx\n",
-                   (unsigned long long int)res->start,
-                   (unsigned long long int)resource_size(res));
-        return -ENXIO;
-    }
-
-    dev_printk(KERN_DEBUG, &dp->pdev->dev,
-               "Device uses memory mapped access: 0x%llx/0x%llx\n",
-               (unsigned long long int)res->start,
-               (unsigned long long int)resource_size(res));
 
     return 0;
 }
@@ -122,7 +92,6 @@ static int deipce_fsc_mmio_init_device(struct deipce_fsc_dev_priv *dp)
  */
 static int deipce_fsc_device_config(struct deipce_fsc_dev_priv *dp)
 {
-    struct device_node *node = NULL;
     unsigned int value = 0;
     int ret = -ENXIO;
 
@@ -165,17 +134,6 @@ static int deipce_fsc_device_config(struct deipce_fsc_dev_priv *dp)
         return ret;
     dp->clock_cycle_length = 1000u / value;
 
-    // Setting clock via device tree is optional.
-    node = of_parse_phandle(dp->pdev->dev.of_node, "schedule-clock", 0);
-    if (node) {
-        dp->phc = deipce_clock_of_get_phc(node);
-        of_node_put(node);
-        if (!dp->phc)
-            dev_err(&dp->pdev->dev, "Failed to get PHC\n");
-        dev_dbg(&dp->pdev->dev, "Using default PHC index %i\n",
-                deipce_clock_get_phc_index(dp->phc));
-    }
-
     dev_printk(KERN_DEBUG, &dp->pdev->dev,
                "FSC with %u schedulers, %u outputs, %u rows, "
                "clock cycle %u ns\n",
@@ -183,16 +141,6 @@ static int deipce_fsc_device_config(struct deipce_fsc_dev_priv *dp)
                dp->clock_cycle_length);
 
     return 0;
-}
-
-/**
- * Cleanup MMIO register access.
- */
-static void deipce_fsc_mmio_cleanup_device(struct deipce_fsc_dev_priv *dp)
-{
-    iounmap(dp->ioaddr);
-    dp->ioaddr = NULL;
-    return;
 }
 
 /**
@@ -283,6 +231,7 @@ static int deipce_fsc_init_sched(struct deipce_fsc_dev_priv *dp,
  */
 static int deipce_fsc_device_init(struct platform_device *pdev)
 {
+    struct resource *res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
     struct deipce_fsc_drv_priv *drv = deipce_fsc_get_drv_priv();
     struct deipce_fsc_dev_priv *dp = NULL;
     struct deipce_fsc_sched *sched = NULL;
@@ -294,11 +243,15 @@ static int deipce_fsc_device_init(struct platform_device *pdev)
 
     dev_dbg(&pdev->dev, "Init device\n");
 
+    if (!res) {
+        dev_err(&pdev->dev, "No I/O memory defined\n");
+        return ret;
+    }
+
     dp = kmalloc(sizeof(*dp), GFP_KERNEL);
     if (!dp) {
         dev_err(&pdev->dev, "kmalloc failed\n");
-        ret = -ENOMEM;
-        goto err_alloc;
+        return -ENOMEM;
     }
 
     *dp = (struct deipce_fsc_dev_priv) {
@@ -309,9 +262,18 @@ static int deipce_fsc_device_init(struct platform_device *pdev)
     INIT_LIST_HEAD(&dp->list);
     list_add(&dp->list, &drv->devices);
 
-    ret = deipce_fsc_mmio_init_device(dp);
-    if (ret)
-        goto err_init;
+    dp->ioaddr = ioremap_nocache(res->start, resource_size(res));
+    if (!dp->ioaddr) {
+        dev_printk(KERN_WARNING, &dp->pdev->dev,
+                   ": ioremap failed for device address 0x%llx/0x%llx\n",
+                   (unsigned long long int)res->start,
+                   (unsigned long long int)resource_size(res));
+        goto err_ioremap;
+    }
+
+    dev_printk(KERN_DEBUG, &dp->pdev->dev, "Registers at 0x%llx/0x%llx\n",
+               (unsigned long long int)res->start,
+               (unsigned long long int)resource_size(res));
 
     ret = deipce_fsc_device_config(dp);
     if (ret) {
@@ -350,15 +312,15 @@ static int deipce_fsc_device_init(struct platform_device *pdev)
     return 0;
 
 err_sched_init:
-    deipce_fsc_mmio_cleanup_device(dp);
-
 err_config:
-err_init:
+    iounmap(dp->ioaddr);
+    dp->ioaddr = NULL;
+
+err_ioremap:
     list_del(&dp->list);
     dp->pdev = NULL;
     kfree(dp);
 
-err_alloc:
     return ret;
 }
 
@@ -369,7 +331,8 @@ static void deipce_fsc_device_cleanup(struct deipce_fsc_dev_priv *dp)
 {
     dev_dbg(&dp->pdev->dev, "Cleanup device\n");
 
-    deipce_fsc_mmio_cleanup_device(dp);
+    iounmap(dp->ioaddr);
+    dp->ioaddr = NULL;
 
     list_del(&dp->list);
     dp->pdev = NULL;

@@ -140,6 +140,6 @@ bool deipce_is_supported_by_adapter(struct deipce_port_priv *pp,
 enum link_mode deipce_best_adapter_link_mode(struct deipce_port_priv *pp);
 void deipce_get_adapter_delays(struct deipce_port_priv *pp,
                                struct deipce_delay *delay);
-int deipce_cleanup_adapter(struct deipce_port_priv *pp);
+void deipce_cleanup_adapter(struct deipce_port_priv *pp);
 
 #endif

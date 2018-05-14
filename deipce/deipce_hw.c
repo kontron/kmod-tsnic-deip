@@ -168,6 +168,38 @@ void deipce_reset_port_vlan_config(struct deipce_port_priv *port,
 }
 
 /**
+ * Get default VLAN priority code point for port.
+ * @param pp Port privates.
+ * @return Port default PCP.
+ */
+unsigned int deipce_get_default_vlan_pcp(struct deipce_port_priv *pp)
+{
+    uint16_t port_vlan = deipce_read_port_reg(pp, PORT_REG_VLAN);
+
+    return PORT_VLAN_PCP_GET(port_vlan);
+}
+
+/**
+ * Set default VLAN priority code point for port.
+ * @param pp Port privates.
+ * @param pcp New default PCP value.
+ */
+int deipce_set_default_vlan_pcp(struct deipce_port_priv *pp, unsigned int pcp)
+{
+    uint16_t port_vlan;
+
+    if (pcp > PORT_VLAN_PCP_MAX)
+        return -EINVAL;
+
+    port_vlan = deipce_read_port_reg(pp, PORT_REG_VLAN);
+    port_vlan &= ~PORT_VLAN_PCP_MASK;
+    port_vlan |= PORT_VLAN_PCP(pcp);
+    deipce_write_port_reg(pp, PORT_REG_VLAN, port_vlan);
+
+    return 0;
+}
+
+/**
  * Get current link mode from external/automatic speed detection signals.
  * @param pp Port privates.
  * @return Link mode.

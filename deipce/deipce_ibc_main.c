@@ -30,7 +30,8 @@
 #include <linux/of.h>
 
 #include "deipce_main.h"
-#include "deipce_clock_ptp.h"
+#include "deipce_time.h"
+#include "deipce_clock_main.h"
 #include "deipce_ibc_types.h"
 #include "deipce_ibc_if.h"
 #include "deipce_ibc_main.h"
@@ -66,45 +67,6 @@ struct deipce_ibc_dev_priv *deipce_ibc_of_get_device_by_node(
 }
 
 /**
- * Get information about selectable clocks.
- * @param dp Device privates.
- * @param phc_list Place for available PHCs.
- * @param count Number of items in phc_list.
- * @param time_sel Place for current time interface number or NULL
- * @param gp_sel Place for current GP interface number or NULL
- * @return Number of selectable clocks updated in phc_list.
- */
-unsigned int deipce_ibc_get_clocks(struct deipce_ibc_dev_priv *dp,
-                                   struct deipce_ibc_phc_info *phc_list,
-                                   unsigned int count,
-                                   unsigned int *time_sel,
-                                   unsigned int *gp_sel)
-{
-    unsigned int i;
-
-    if (count > ARRAY_SIZE(dp->phc))
-        count = ARRAY_SIZE(dp->phc);
-
-    for (i = 0; i < count; i++)
-        phc_list[i] = dp->phc[i];
-
-    if (time_sel || gp_sel) {
-        mutex_lock(&dp->lock);
-
-        if (gp_sel)
-            *gp_sel =
-                deipce_ibc_read_reg(dp, IBC_REG_GP_MUX_CTRL) & IBC_MUX_MASK;
-        if (time_sel)
-            *time_sel =
-                deipce_ibc_read_reg(dp, IBC_REG_TIME_MUX_CTRL) & IBC_MUX_MASK;
-
-        mutex_unlock(&dp->lock);
-    }
-
-    return count;
-}
-
-/**
  * Set IBC MUXes.
  * @param dp Device privates.
  * @param time_sel Time interface to use.
@@ -113,54 +75,16 @@ unsigned int deipce_ibc_get_clocks(struct deipce_ibc_dev_priv *dp,
 int deipce_ibc_set(struct deipce_ibc_dev_priv *dp,
                    unsigned int time_sel, unsigned int gp_sel)
 {
-    int ret = -EBUSY;
-
     dev_dbg(&dp->pdev->dev, "%s() Set time 0x%x GP 0x%x\n",
             __func__, time_sel, gp_sel);
 
     if (time_sel > 1 || gp_sel > 1)
         return -EINVAL;
 
-    mutex_lock(&dp->lock);
-
     deipce_ibc_write_reg(dp, IBC_REG_GP_MUX_CTRL, gp_sel);
     deipce_ibc_write_reg(dp, IBC_REG_TIME_MUX_CTRL, time_sel);
 
-    mutex_unlock(&dp->lock);
-
-    return ret;
-}
-
-/**
- * Set IBC MUXes.
- * @param dp Device privates.
- * @param time_sel Time interface to use.
- * @param gp_sel GP interface to use.
- */
-int deipce_ibc_set_by_phc(struct deipce_ibc_dev_priv *dp, int phc_index)
-{
-    int ret = -EINVAL;
-    int mux_sel = -1;
-
-    mutex_lock(&dp->lock);
-
-    if (phc_index == dp->phc[0].index)
-        mux_sel = 0;
-    else if (phc_index == dp->phc[1].index)
-        mux_sel = 1;
-
-    if (mux_sel >= 0) {
-        deipce_ibc_write_reg(dp, IBC_REG_GP_MUX_CTRL, mux_sel);
-        deipce_ibc_write_reg(dp, IBC_REG_TIME_MUX_CTRL, mux_sel);
-        ret = 0;
-    }
-
-    mutex_unlock(&dp->lock);
-
-    dev_dbg(&dp->pdev->dev, "%s() Set for PHC %i time 0x%x GP 0x%x\n",
-            __func__, phc_index, mux_sel, mux_sel);
-
-    return ret;
+    return 0;
 }
 
 /**
@@ -174,7 +98,6 @@ static int deipce_ibc_device_init(struct platform_device *pdev)
     struct deipce_ibc_dev_priv *dp;
     struct resource *res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
     struct device_node *node = NULL;
-    unsigned int i;
     uint32_t version = 0;
     uint16_t dev_id = 0;
     int ret = -ENXIO;
@@ -191,7 +114,6 @@ static int deipce_ibc_device_init(struct platform_device *pdev)
         .pdev = pdev,
     };
 
-    mutex_init(&dp->lock);
     INIT_LIST_HEAD(&dp->list);
     list_add(&dp->list, &drv->devices);
 
@@ -209,18 +131,14 @@ static int deipce_ibc_device_init(struct platform_device *pdev)
         (deipce_ibc_read_reg(dp, IBC_REG_DEV_ID0) >> 8) |
         (deipce_ibc_read_reg(dp, IBC_REG_DEV_ID1) << 8);
 
-    for (i = 0; i < ARRAY_SIZE(dp->phc); i++) {
-        node = of_parse_phandle(pdev->dev.of_node, "mux-clocks", i);
-        if (node) {
-            dp->phc[i].info = deipce_clock_of_get_phc(node);
-            of_node_put(node);
-            dp->phc[i].index = deipce_clock_get_phc_index(dp->phc[i].info);
-        }
-        else {
-            dp->phc[i].index = -1;
-        }
-        dev_dbg(&pdev->dev, "time_sel %u -> PHC index %i\n",
-                i, dp->phc[i].index);
+    // Only used for associating MUX with time interface.
+    node = of_parse_phandle(pdev->dev.of_node, "mux-clocks", 0);
+    if (node) {
+        struct flx_frtc_dev_priv *clk = deipce_clock_of_get_clock(node);
+
+        of_node_put(node);
+        if (clk)
+            deipce_time_add_mux(clk, dp);
     }
 
     if (dev_id != 0x00e0) {
@@ -255,12 +173,13 @@ err_ioremap:
  */
 static void deipce_ibc_device_cleanup(struct deipce_ibc_dev_priv *dp)
 {
+    deipce_time_remove_mux(dp);
+
     iounmap(dp->ioaddr);
     dp->ioaddr = NULL;
 
     list_del(&dp->list);
     dp->pdev = NULL;
-    mutex_destroy(&dp->lock);
 
     kfree(dp);
 

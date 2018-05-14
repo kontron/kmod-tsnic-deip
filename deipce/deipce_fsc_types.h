@@ -121,7 +121,7 @@ struct deipce_fsc_dev_priv {
 
     struct mutex lock;                  ///< synchronize access to registers
     void __iomem *ioaddr;               ///< memory mapped I/O registers
-    struct ptp_clock_info *phc;         ///< associated clock
+    struct deipce_time *time;           ///< associated time interface
 
     /// schedulers of this FSC
     struct deipce_fsc_sched sched[DEIPCE_FSC_MAX_SCHEDULERS];

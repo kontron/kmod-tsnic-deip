@@ -35,6 +35,9 @@
 #define DEIPCE_ATTR_RO(name, show) \
     DEVICE_ATTR(name, S_IRUGO, show, NULL)
 
+#define DEIPCE_ATTR_WO(name, store) \
+    DEVICE_ATTR(name, S_IWUSR, NULL, store)
+
 #define DEIPCE_BIN_ATTR_RW(name, read, write, size) \
     BIN_ATTR(name, (S_IWUSR | S_IRUGO), read, write, size)
 

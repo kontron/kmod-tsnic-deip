@@ -25,13 +25,10 @@
 #define DEIPCE_FPTS_TYPES_H
 
 #include <linux/types.h>
-#include <linux/workqueue.h>
 #include <linux/device.h>
 #include <linux/platform_device.h>
+#include <linux/time64.h>
 #include <linux/io.h>
-#include <linux/ptp_clock.h>
-
-#define DEIPCE_FPTS_MAX_DEVICES  32
 
 struct deipce_fpts_drv_priv;
 struct deipce_fpts_dev_priv;
@@ -40,7 +37,6 @@ struct deipce_fpts_dev_priv;
  * Event information structure.
  */
 struct deipce_fpts_event {
-    //struct ptp_clock_time time;         ///< event time
     struct timespec64 time;             ///< event time
     uint32_t counter;                   ///< total event count
 };
@@ -52,7 +48,6 @@ struct deipce_fpts_dev_priv {
     struct list_head list;              ///< linked list
     struct deipce_fpts_drv_priv *drv;   ///< back reference
     struct platform_device *pdev;       ///< FPTS platform device
-    unsigned int dev_num;               ///< number of this device
     void __iomem *ioaddr;               ///< memory mapped I/O address
     struct deipce_fpts_event last_event;   ///< last read event information
 };
@@ -62,8 +57,6 @@ struct deipce_fpts_dev_priv {
  */
 struct deipce_fpts_drv_priv {
     struct list_head devices;           ///< our devices
-    /// used device numbers
-    DECLARE_BITMAP(used_devices, DEIPCE_FPTS_MAX_DEVICES);
 };
 
 static inline uint16_t deipce_fpts_read16(struct deipce_fpts_dev_priv *dp,

@@ -323,54 +323,12 @@ void flx_frtc_ptp_cleanup(struct flx_frtc_dev_priv *dp)
 }
 
 /**
- * Get PHC of an FRTC node.
- * @param node FRTC node.
- * @return PHC information or NULL if not an FRTC node or an error.
- */
-struct ptp_clock_info *deipce_clock_of_get_phc(struct device_node *node)
-{
-    struct flx_frtc_drv_priv *drv = flx_frtc_get_drv();
-    static struct flx_frtc_dev_priv *dp = NULL;
-
-    list_for_each_entry(dp, &drv->devices, list) {
-        if (dp->pdev->dev.of_node == node)
-            return &dp->ptp_info;
-    }
-
-    return NULL;
-}
-
-/**
  * Get PHC index of an FRTC PHC.
  * @param phc PHC information of an FRTC device.
  * @return PHC index or NULL.
  */
-int deipce_clock_get_phc_index(struct ptp_clock_info *phc)
+int deipce_clock_get_phc_index(struct flx_frtc_dev_priv *dp)
 {
-    static struct flx_frtc_dev_priv *dp;
-
-    if (!phc)
-        return -1;
-
-    dp = container_of(phc, struct flx_frtc_dev_priv, ptp_info);
     return ptp_clock_index(dp->ptp_clock);
-}
-
-/**
- * Get PHC index of an FRTC node.
- * @param node FRTC node.
- * @return PHC index or -1 if not an FRTC node or an error.
- */
-int deipce_clock_of_get_phc_index(struct device_node *node)
-{
-    struct flx_frtc_drv_priv *drv = flx_frtc_get_drv();
-    static struct flx_frtc_dev_priv *dp = NULL;
-
-    list_for_each_entry(dp, &drv->devices, list) {
-        if (dp->pdev->dev.of_node == node)
-            return ptp_clock_index(dp->ptp_clock);
-    }
-
-    return -1;
 }
 

@@ -24,12 +24,15 @@
 /// Uncomment to enable debug messages
 //#define DEBUG
 
+#include <linux/rtnetlink.h>
+
 #include "deipce_main.h"
+#include "deipce_hw.h"
 #include "deipce_sysfs_common.h"
 #include "deipce_edgex_sysfs.h"
 #include "deipce_port_sysfs.h"
 
-/// portNumTrafficClasses
+/// ieee8021Bridge/portNumTrafficClasses
 
 static ssize_t deipce_port_sysfs_port_num_tc_show(
         struct device *dev, struct device_attribute *attr,
@@ -49,12 +52,99 @@ static ssize_t deipce_port_sysfs_port_num_tc_show(
 static DEIPCE_ATTR_RO(portNumTrafficClasses,
                    &deipce_port_sysfs_port_num_tc_show);
 
+/// ieee8021Bridge/portDefaultUserPriority
+
+static ssize_t deipce_port_sysfs_port_default_user_prio_show(
+        struct device *dev, struct device_attribute *attr,
+        char *buf)
+{
+    struct deipce_port_priv *pp = to_deipce_port_priv(dev);
+    unsigned int pcp;
+    int ret;
+
+    netdev_dbg(to_net_dev(dev), "%s()\n", __func__);
+
+    // Accesses to VLAN configs are synchronized via rtnl lock.
+    rtnl_lock();
+    pcp = deipce_get_default_vlan_pcp(pp);
+    rtnl_unlock();
+
+    ret = sprintf(buf, "%u\n", pcp);
+
+    return ret;
+}
+
+static ssize_t deipce_port_sysfs_port_default_user_prio_store(
+        struct device *dev, struct device_attribute *attr,
+        const char *buf, size_t count)
+{
+    struct deipce_port_priv *pp = to_deipce_port_priv(dev);
+    unsigned int pcp;
+    int ret = kstrtouint(buf, 0, &pcp);
+
+    netdev_dbg(to_net_dev(dev), "%s() buf %s count %zu\n",
+               __func__, buf, count);
+
+    if (ret)
+        return ret;
+
+    // Accesses to VLAN configs are synchronized via rtnl lock.
+    rtnl_lock();
+    ret = deipce_set_default_vlan_pcp(pp, pcp);
+    rtnl_unlock();
+
+    if (ret)
+        return ret;
+
+    return count;
+}
+
+static DEIPCE_ATTR_RW(portDefaultUserPriority,
+                   &deipce_port_sysfs_port_default_user_prio_show,
+                   &deipce_port_sysfs_port_default_user_prio_store);
+
+// ieee8021Mstp/flushTree
+
+static ssize_t deipce_port_sysfs_mstp_flush_tree_store(
+        struct device *dev, struct device_attribute *attr,
+        const char *buf, size_t count)
+{
+    struct deipce_port_priv *pp = to_deipce_port_priv(dev);
+    struct deipce_dev_priv *dp = pp->dp;
+    unsigned int mstid;
+    int ret = kstrtouint(buf, 0, &mstid);
+
+    netdev_dbg(to_net_dev(dev), "%s() buf %s count %zu\n",
+               __func__, buf, count);
+
+    if (ret)
+        return ret;
+
+    // MSTID is ignored (RSTP support only).
+    ret = deipce_clear_mac_table(dp, 1u << pp->port_num);
+    if (ret)
+        return ret;
+
+    return count;
+}
+
+static DEIPCE_ATTR_WO(flushTree,
+                   &deipce_port_sysfs_mstp_flush_tree_store);
+
 /// Attribute groups
 static const struct attribute_group *deipce_port_sysfs_attr_groups[] = {
     &(struct attribute_group){
         .name = "ieee8021Bridge",
         .attrs = (struct attribute*[]){
             &dev_attr_portNumTrafficClasses.attr,
+            &dev_attr_portDefaultUserPriority.attr,
+            NULL,
+        },
+    },
+    &(struct attribute_group){
+        .name = "ieee8021Mstp",
+        .attrs = (struct attribute*[]){
+            &dev_attr_flushTree.attr,
             NULL,
         },
     },

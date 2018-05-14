@@ -49,7 +49,7 @@
 #define FSC_ROW_DATA_OUT2               0x1014  ///< row data, outputs
 #define FSC_ROW_DATA_OUT3               0x1016  ///< row data, outputs, MSB
 #define FSC_ROW_DATA_CYCLES             0x1018  ///< time to stay on this row
-#define FSC_ROW_DATA_CYCLES_MIN         64      ///< min. number of cycles
+#define FSC_ROW_DATA_CYCLES_MIN         8       ///< min. number of cycles
 #define FSC_ROW_DATA_CYCLES_MAX         U16_MAX ///< max. number of cycles
 
 // Generics registers

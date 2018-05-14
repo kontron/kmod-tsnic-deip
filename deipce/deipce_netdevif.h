@@ -37,13 +37,14 @@ void deipce_netdevif_cleanup_stamper(struct deipce_tx_stamper *stamper);
 int deipce_xmit(struct deipce_dev_priv *dp, struct sk_buff *skb,
                 unsigned int trailer);
 int deipce_irq_init(struct deipce_dev_priv *dp);
+void deipce_irq_enable(struct deipce_dev_priv *dp);
+void deipce_irq_disable(struct deipce_dev_priv *dp);
 void deipce_irq_cleanup(struct deipce_dev_priv *dp);
-struct deipce_port_priv *deipce_get_cpu_port(struct deipce_dev_priv *dp);
 int deipce_update_ipo_rules(struct net_device *netdev);
-void deipce_get_mgmt_prio(struct deipce_port_priv *pp,
-                          unsigned int *prio, bool *enable);
-int deipce_set_mgmt_prio(struct deipce_port_priv *pp, unsigned int prio,
-                         bool enable);
+unsigned int deipce_get_mgmt_tc(struct deipce_port_priv *pp);
+int deipce_set_mgmt_tc(struct deipce_port_priv *pp, unsigned int tc);
+int deipce_get_mirror_port(struct deipce_port_priv *pp);
+int deipce_set_mirror_port(struct deipce_port_priv *pp, int mirror_port);
 
 /**
  * Get value for FRS interrupt mask register.
@@ -56,10 +57,7 @@ static inline uint16_t deipce_get_intmask(struct deipce_dev_priv *dp)
     if (dp->use_port_ts)
         return FRS_INT_TX_TSTAMP;
     // With port 0 (CPU port) timestampers use only RX timestamp interrupt.
-    if (deipce_dev_has_cpu_port(dp))
-        return FRS_INT_RX_TSTAMP;
-    // Otherwise do not use interrupts.
-    return 0;
+    return FRS_INT_RX_TSTAMP;
 }
 
 /**

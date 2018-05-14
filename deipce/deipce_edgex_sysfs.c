@@ -34,37 +34,36 @@
 #include "deipce_sysfs_common.h"
 #include "deipce_edgex_sysfs.h"
 
-/// mgmtTrafficClassOverride
+/// mgmtTrafficClass
 
-static ssize_t deipce_edgex_sysfs_tc_override_show(
+static ssize_t deipce_edgex_sysfs_tc_show(
         struct device *dev, struct device_attribute *attr,
         char *buf)
 {
     struct deipce_port_priv *pp = to_deipce_port_priv(dev);
-    unsigned int prio;
+    unsigned int tc;
     int ret;
 
     netdev_dbg(to_net_dev(dev), "%s()\n", __func__);
 
     rtnl_lock();
 
-    deipce_get_mgmt_prio(pp, &prio, NULL);
+    tc = deipce_get_mgmt_tc(pp);
 
     rtnl_unlock();
 
-    ret = sprintf(buf, "%u\n", prio);
+    ret = sprintf(buf, "%u\n", tc);
 
     return ret;
 }
 
-static ssize_t deipce_edgex_sysfs_tc_override_store(
+static ssize_t deipce_edgex_sysfs_tc_store(
         struct device *dev, struct device_attribute *attr,
         const char *buf, size_t count)
 {
     struct deipce_port_priv *pp = to_deipce_port_priv(dev);
-    unsigned int prio;
-    bool enable;
-    int ret = kstrtouint(buf, 0, &prio);
+    unsigned int tc;
+    int ret = kstrtouint(buf, 0, &tc);
 
     netdev_dbg(to_net_dev(dev), "%s() buf %s count %zu\n",
                __func__, buf, count);
@@ -74,8 +73,7 @@ static ssize_t deipce_edgex_sysfs_tc_override_store(
 
     rtnl_lock();
 
-    deipce_get_mgmt_prio(pp, NULL, &enable);
-    ret = deipce_set_mgmt_prio(pp, prio, enable);
+    ret = deipce_set_mgmt_tc(pp, tc);
 
     rtnl_unlock();
 
@@ -85,41 +83,40 @@ static ssize_t deipce_edgex_sysfs_tc_override_store(
     return count;
 }
 
-static DEIPCE_ATTR_RW(mgmtTrafficClassOverride,
-                   &deipce_edgex_sysfs_tc_override_show,
-                   &deipce_edgex_sysfs_tc_override_store);
+static DEIPCE_ATTR_RW(mgmtTrafficClass,
+                   &deipce_edgex_sysfs_tc_show,
+                   &deipce_edgex_sysfs_tc_store);
 
-/// mgmtTrafficClassOverrideEnable
+/// mirrorPort
 
-static ssize_t deipce_edgex_sysfs_tc_override_enable_show(
+static ssize_t deipce_edgex_sysfs_mirror_show(
         struct device *dev, struct device_attribute *attr,
         char *buf)
 {
     struct deipce_port_priv *pp = to_deipce_port_priv(dev);
-    bool enable;
+    int mirror_port;
     int ret;
 
     netdev_dbg(to_net_dev(dev), "%s()\n", __func__);
 
     rtnl_lock();
 
-    deipce_get_mgmt_prio(pp, NULL, &enable);
+    mirror_port = deipce_get_mirror_port(pp);
 
     rtnl_unlock();
 
-    ret = sprintf(buf, "%u\n", enable);
+    ret = sprintf(buf, "%i\n", mirror_port);
 
     return ret;
 }
 
-static ssize_t deipce_edgex_sysfs_tc_override_enable_store(
+static ssize_t deipce_edgex_sysfs_mirror_store(
         struct device *dev, struct device_attribute *attr,
         const char *buf, size_t count)
 {
     struct deipce_port_priv *pp = to_deipce_port_priv(dev);
-    unsigned int prio;
-    bool enable;
-    int ret = kstrtobool(buf, &enable);
+    int mirror_port;
+    int ret = kstrtoint(buf, 0, &mirror_port);
 
     netdev_dbg(to_net_dev(dev), "%s() buf %s count %zu\n",
                __func__, buf, count);
@@ -129,8 +126,7 @@ static ssize_t deipce_edgex_sysfs_tc_override_enable_store(
 
     rtnl_lock();
 
-    deipce_get_mgmt_prio(pp, &prio, NULL);
-    ret = deipce_set_mgmt_prio(pp, prio, enable);
+    ret = deipce_set_mirror_port(pp, mirror_port);
 
     rtnl_unlock();
 
@@ -140,9 +136,9 @@ static ssize_t deipce_edgex_sysfs_tc_override_enable_store(
     return count;
 }
 
-static DEIPCE_ATTR_RW(mgmtTrafficClassOverrideEnable,
-                      &deipce_edgex_sysfs_tc_override_enable_show,
-                      &deipce_edgex_sysfs_tc_override_enable_store);
+static DEIPCE_ATTR_RW(mirrorPort,
+                   &deipce_edgex_sysfs_mirror_show,
+                   &deipce_edgex_sysfs_mirror_store);
 
 /// cutThrough
 
@@ -215,8 +211,8 @@ static const struct attribute_group *deipce_edgex_sysfs_attr_groups[] = {
         .name = "edgex-ext",
         .is_visible = &deipce_edgex_sysfs_is_visible,
         .attrs = (struct attribute*[]){
-            &dev_attr_mgmtTrafficClassOverride.attr,
-            &dev_attr_mgmtTrafficClassOverrideEnable.attr,
+            &dev_attr_mgmtTrafficClass.attr,
+            &dev_attr_mirrorPort.attr,
             &dev_attr_cutThrough.attr,
             NULL,
         },

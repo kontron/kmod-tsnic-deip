@@ -35,6 +35,7 @@
 
 #include "deipce_main.h"
 #include "deipce_fpts_main.h"
+#include "deipce_time.h"
 #include "deipce_clock_types.h"
 #include "deipce_clock_nco.h"
 #include "deipce_clock_ptp.h"
@@ -48,6 +49,38 @@ struct flx_frtc_drv_priv flx_frtc_drv_priv;
 struct flx_frtc_drv_priv *flx_frtc_get_drv(void)
 {
     return &flx_frtc_drv_priv;
+}
+
+/**
+ * Get FRTC of an FRTC node.
+ * @param node FRTC node.
+ * @return FRTC or NULL if not an FRTC node or an error.
+ */
+struct flx_frtc_dev_priv *deipce_clock_of_get_clock(struct device_node *node)
+{
+    struct flx_frtc_drv_priv *drv = flx_frtc_get_drv();
+    static struct flx_frtc_dev_priv *dp = NULL;
+
+    list_for_each_entry(dp, &drv->devices, list) {
+        if (dp->pdev->dev.of_node == node)
+            return dp;
+    }
+
+    return NULL;
+}
+
+/**
+ * Get FRTC time granularity.
+ * @param dp Clock device privates.
+ * @param granularity Place for granularity, value is tenths of nanoseconds.
+ */
+void deipce_clock_get_granularity(struct flx_frtc_dev_priv *dp,
+                                  uint32_t *granularity)
+{
+    *granularity = dp->step_nsec * 10u +
+        (uint32_t)(((uint64_t)dp->step_subnsec * 10u) >> 32);
+
+    return;
 }
 
 /**
@@ -146,6 +179,7 @@ static void flx_frtc_dev_cleanup(struct flx_frtc_dev_priv *dp)
 
     dev_dbg(&pdev->dev, "Cleanup\n");
 
+    deipce_time_remove_clock(dp);
     flx_frtc_ptp_cleanup(dp);
 
     iounmap(dp->ioaddr);
@@ -180,7 +214,6 @@ int __init deipce_clock_init_driver(void)
 #ifdef CONFIG_PTP_1588_CLOCK
 #ifdef PTP_PTP_OFFSET_PRECISE
     static struct flx_frtc_dev_priv *dp = NULL;
-    struct ptp_clock_info *info = NULL;
 #endif
 #endif
 
@@ -195,20 +228,24 @@ int __init deipce_clock_init_driver(void)
     // Resolve cross-device timestamping setups.
     list_for_each_entry(dp, &drv->devices, list) {
         if (dp->event.trigger_node) {
-            info = deipce_clock_of_get_phc(dp->event.trigger_node);
             dp->event.trigger =
-                container_of(info, struct flx_frtc_dev_priv, ptp_info);
+                deipce_clock_of_get_clock(dp->event.trigger_node);
             if (!dp->event.trigger) {
                 dev_warn(&dp->pdev->dev,
                          "Failed to get ext TS trigger clock\n");
             }
             else {
-                flx_frtc_ptp_init_devxtstamp(dp);
+                deipce_time_create_by_clocks(dp->event.trigger, dp,
+                                             dp->event.fpts);
                 // Ignore errors.
             }
 
             of_node_put(dp->event.trigger_node);
             dp->event.trigger_node = NULL;
+        }
+        else {
+            deipce_time_create_by_clocks(dp, NULL, NULL);
+            // Ignore errors.
         }
     }
 #endif

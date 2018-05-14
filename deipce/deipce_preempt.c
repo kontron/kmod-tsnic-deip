@@ -57,8 +57,8 @@ static const uint8_t deipce_preempt_verify_frame[ETH_ZLEN] = { 0 };
  * @param dp FRS device privates.
  * @return Management trailer which has only relevant SMD bits set.
  */
-uint16_t deipce_preempt_smd_to_trailer(struct deipce_dev_priv *dp,
-                                       enum deipce_preempt_smd smd)
+static uint16_t deipce_preempt_smd_to_trailer(struct deipce_dev_priv *dp,
+                                              enum deipce_preempt_smd smd)
 {
     if (dp->features.preempt_ports) {
         // Next to MACsec bit, regardless of MACsec feature.
@@ -83,7 +83,7 @@ uint16_t deipce_preempt_trailer_mask(struct deipce_dev_priv *dp)
  * @param dp FRS device privates.
  * param trailer Management trailer value.
  */
-enum deipce_preempt_smd deipce_preempt_trailer_to_smd(
+static enum deipce_preempt_smd deipce_preempt_trailer_to_smd(
         struct deipce_dev_priv *dp, uint16_t trailer)
 {
     if (dp->features.preempt_ports) {

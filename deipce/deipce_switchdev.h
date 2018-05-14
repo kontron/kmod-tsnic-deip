@@ -35,6 +35,7 @@
 #include "deipce_hw_type.h"
 
 struct deipce_dev_priv;
+struct deipce_port_priv;
 
 /**
  * Learned FDB entry for FES MAC table addresses.
@@ -43,13 +44,14 @@ struct deipce_switchdev_fdb_entry {
     struct hlist_node hlist;            ///< hash list
     uint32_t hkey;                      ///< hash key
     unsigned int last_seen;             ///< last seen counter value
-    struct deipce_dmac_entry key;      ///< dynamic MAC address table entry
+    struct deipce_dmac_entry key;       ///< dynamic MAC address table entry
 };
 
 /**
  * FES context for switchdev support.
  */
 struct deipce_switchdev {
+    clock_t ageing_time;                ///< current ageing time
     unsigned int enabled_port_count;    ///< number of enabled port netdevices
     unsigned int fdb_counter;           ///< current FDB check counter
     DECLARE_HASHTABLE(fdb, 16);         ///< learned FDB entries,
@@ -66,7 +68,9 @@ struct deipce_switchdev_port {
 };
 
 int deipce_switchdev_init_driver(void);
-int deipce_switchdev_init_device(struct deipce_dev_priv *dp);
+int deipce_switchdev_init_switch(struct deipce_dev_priv *dp);
+int deipce_switchdev_init_port(struct deipce_dev_priv *dp,
+                               struct deipce_port_priv *pp);
 int deipce_switchdev_setup_netdev(struct net_device *netdev);
 int deipce_switchdev_enable(struct net_device *netdev);
 void deipce_switchdev_disable(struct net_device *netdev);
@@ -74,12 +78,13 @@ void deipce_switchdev_disable(struct net_device *netdev);
 int deipce_switchdev_get_phys_port_name(struct net_device *netdev,
                                         char *name, size_t len);
 
-void deipce_switchdev_cleanup_device(struct deipce_dev_priv *dp);
+void deipce_switchdev_cleanup_switch(struct deipce_dev_priv *dp);
 void deipce_switchdev_cleanup_driver(void);
 
 #else // CONFIG_NET_SWITCHDEV
 
 struct deipce_dev_priv;
+struct deipce_port_priv;
 
 /**
  * Dummy FES context for switchdev support.
@@ -96,7 +101,11 @@ struct deipce_switchdev_port {
 static inline int deipce_switchdev_init_driver(void)
 { return 0; }
 
-static inline int deipce_switchdev_init_device(struct deipce_dev_priv *dp)
+static inline int deipce_switchdev_init_switch(struct deipce_dev_priv *dp)
+{ return 0; }
+
+static inline int deipce_switchdev_init_port(struct deipce_dev_priv *dp,
+                                             struct deipce_port_priv *pp)
 { return 0; }
 
 static inline int deipce_switchdev_setup_netdev(struct net_device *netdev)
@@ -108,7 +117,7 @@ static inline int deipce_switchdev_enable(struct net_device *netdev)
 static inline void deipce_switchdev_disable(struct net_device *netdev)
 { }
 
-static inline void deipce_switchdev_cleanup_device(
+static inline void deipce_switchdev_cleanup_switch(
         struct deipce_dev_priv *dp)
 { }
 

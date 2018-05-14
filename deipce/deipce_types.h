@@ -38,10 +38,26 @@
 #include "deipce_switchdev.h"
 #include "deipce_preempt.h"
 
-/// Maximum number of FRS devices
-#define DEIPCE_MAX_DEVICES  8
+#define DEIPCE_MAX_DEVICES              8       ///< limit for switch devices
+#define DEIPCE_MAX_PORTS                16      ///< limit for number of ports
 
-/// Modes supported by FRS
+#define DEIPCE_MAX_PRIO_QUEUES          8       ///< limit for priority queues
+#define DEIPCE_MIN_POLICERS             128     ///< limit for policers
+#define DEIPCE_MAX_POLICERS             4096    ///< limit for policers
+#define DEIPCE_MIN_SMAC_ROWS            128     ///< limit for SMAC rows
+#define DEIPCE_MAX_SMAC_ROWS            4096    ///< limit for SMAC rows
+
+// Port flags
+#define DEIPCE_PORT_CPU                 BIT(0)  ///< CPU port
+#define DEIPCE_PORT_SPEED_EXT           BIT(1)  ///< Auto/ext speed sel
+#define DEIPCE_ADAPTER_SGMII_PHY_MODE   BIT(2)  ///< SGMII in PHY mode
+#define DEIPCE_SFP_EEPROM               BIT(3)  ///< Use SFP EEPROM
+#define DEIPCE_HAS_PHY                  BIT(4)  ///< PHY configured
+#define DEIPCE_HAS_SFP_PHY              BIT(5)  ///< SFP PHY configured
+#define DEIPCE_HAS_SEPARATE_SFP         BIT(6)  ///< Separate SFP port
+#define DEIPCE_HAS_MASTER               BIT(7)  ///< Attached to master
+
+/// Modes supported by FES
 #define DEIPCE_ETHTOOL_SUPPORTED \
     (SUPPORTED_10baseT_Full | \
      SUPPORTED_100baseT_Full | \
@@ -52,11 +68,42 @@
      SUPPORTED_FIBRE | \
      SUPPORTED_Autoneg)
 
-struct deipce_drv_priv;
 struct deipce_dev_priv;
 struct deipce_port_priv;
 struct deipce_ibc_dev_priv;
 struct deipce_fsc_dev_priv;
+struct deipce_time;
+
+/**
+ * Medium types.
+ */
+enum deipce_medium_type {
+    DEIPCE_MEDIUM_NONE = 0,     ///< Indicates unused port
+    DEIPCE_MEDIUM_SFP = 1,      ///< SFP module
+    DEIPCE_MEDIUM_PHY = 2,      ///< Normal PHY
+    DEIPCE_MEDIUM_NOPHY = 5,    ///< External port, no PHY
+};
+
+/**
+ * Link modes.
+ */
+enum link_mode {
+    LM_DOWN,
+    LM_10FULL,
+    LM_100FULL,
+    LM_1000FULL,
+};
+
+/// Number of link modes
+#define DEIPCE_LINK_MODE_COUNT (LM_1000FULL + 1)
+
+/**
+ * Traffic delays for both directions.
+ */
+struct deipce_delay {
+    unsigned long int tx;       ///< TX delay in ns
+    unsigned long int rx;       ///< RX delay in ns
+};
 
 /**
  * Recognized SFP types.
@@ -254,15 +301,12 @@ struct deipce_port_priv {
 
     struct mutex port_reg_lock;         ///< synchronize port register access
 
-    uint16_t mgmt_prio;                 ///< management traffic IPO priority
-    uint16_t rx_delay;                  ///< RX delay for PTP messages
-    uint16_t tx_delay;                  ///< TX delay for PTP messages
-    uint32_t p2p_delay;                 ///< P2P delay
+    int mirror_port;                    ///< mirror port or -1 to disable
+    uint16_t mgmt_tc;                   ///< management traffic class
     struct deipce_delay cur_delay;      ///< current total delays
     struct deipce_tx_stamper tx_stamper;       ///< PTP TX frame timestamper
     unsigned int rx_stamper;            ///< PTP RX frame timestamper index
 
-    struct deipce_switchdev_port switchdev;     ///< switchdev support
     struct deipce_preempt preempt;      ///< preemption state
     struct {
         struct deipce_fsc_dev_priv *fsc;        ///< FSC instance
@@ -350,6 +394,7 @@ struct deipce_features {
 struct deipce_dev_priv {
     struct device *this_dev;            ///< pointer to (platform) device
     unsigned int dev_num;               ///< number of this device
+    resource_size_t base_addr;          ///< base address
     unsigned int irq;                   ///< IRQ number
 
     unsigned int trailer_len;           ///< management trailer length
@@ -393,11 +438,7 @@ struct deipce_dev_priv {
 
     struct deipce_features features;    ///< switch features
 
-    struct deipce_ibc_dev_priv *ibc;    ///< IBC instance or NULL
-    struct {
-        struct ptp_clock_info *info;    ///< PTP hardware clock instance
-        int index;                      ///< PTP hardware clock number
-    } phc;
+    struct deipce_time *time;           ///< time interface
 
 #ifdef CONFIG_DEBUG_FS
     struct dentry *debugfs_dir;         ///< debugfs port directory
@@ -421,16 +462,6 @@ struct deipce_drv_priv {
     struct dentry *debugfs_dir;         ///< debugfs driver directory
 #endif
 };
-
-/**
- * Checks if an FRS device has a CPU port.
- * @param dp FRS device privates
- * @return True if device has a CPU port, false if it doesn't
- */
-static inline bool deipce_dev_has_cpu_port(struct deipce_dev_priv *dp)
-{
-    return dp->cpu_port_mask != 0;
-}
 
 /**
  * Get pointer to given register for use with memory mapped I/O.

@@ -98,8 +98,8 @@ static inline struct device *phydev_dev(struct phy_device *phydev)
  * @param netdev Netdevice associated with an FRS port.
  * @param link_mode New link mode for port, ignored if link mode is forced.
  */
-int deipce_set_port_mode(struct net_device *netdev,
-                         enum link_mode link_mode)
+static int deipce_set_port_mode(struct net_device *netdev,
+                                enum link_mode link_mode)
 {
     struct deipce_netdev_priv *np = netdev_priv(netdev);
     struct deipce_port_priv *pp = np->pp;
@@ -675,21 +675,6 @@ static void deipce_netdev_tx_timeout(struct net_device *netdev)
 }
 
 /**
- * Netdevice set RX mode.
- * Syncronizes CPU port multicast addresses to EMAC
- * and writes IPO rules for multicast handling.
- */
-static void deipce_port_set_rx_mode(struct net_device *netdev)
-{
-    netdev_dbg(netdev, "%s()\n", __func__);
-
-    deipce_update_ipo_rules(netdev);
-
-    netdev_dbg(netdev, "%s() done\n", __func__);
-    return;
-}
-
-/**
  * Change the MAC address, the address can be changed also on-the-fly.
  */
 static int deipce_set_mac_address(struct net_device *netdev, void *p)
@@ -975,9 +960,6 @@ static int deipce_port_close(struct net_device *netdev)
         deipce_preempt_cleanup(pp);
     deipce_disable_interface(netdev);
 
-    // Ensure IPO rules are updated.
-    deipce_port_set_rx_mode(netdev);
-
     if (pp->medium_type == DEIPCE_MEDIUM_SFP) {
         deipce_cleanup_sfp(pp);
     }
@@ -1071,7 +1053,7 @@ static const struct net_device_ops deipce_netdev_ops = {
     .ndo_get_stats = &deipce_get_stats,
     .ndo_do_ioctl = &deipce_netdev_ioctl,
     .ndo_validate_addr = NULL,
-    .ndo_set_rx_mode = &deipce_port_set_rx_mode,
+    .ndo_set_rx_mode = NULL,
     .ndo_set_mac_address = &deipce_set_mac_address,
     .ndo_tx_timeout = &deipce_netdev_tx_timeout,
     .ndo_change_mtu = NULL,
@@ -1125,8 +1107,8 @@ static struct net_device *deipce_add_netdev(struct deipce_dev_priv *dp,
                                             struct deipce_port_priv *pp,
                                             const char *name)
 {
-    struct deipce_netdev_priv *np = NULL;
-    struct net_device *netdev = NULL;
+    struct deipce_netdev_priv *np;
+    struct net_device *netdev;
     void (*setup)(struct net_device *netdev) =
         pp ? deipce_port_netdev_setup : deipce_ep_netdev_setup;
     int ret = 0;
@@ -1158,6 +1140,7 @@ static struct net_device *deipce_add_netdev(struct deipce_dev_priv *dp,
         dp->netdev = netdev;
         netdev->netdev_ops = &deipce_ep_netdev_ops;
     }
+    netdev->irq = dp->irq;
 
     SET_NETDEV_DEV(netdev, dp->this_dev);
 
@@ -1177,36 +1160,7 @@ static struct net_device *deipce_add_netdev(struct deipce_dev_priv *dp,
         goto free_netdev;
     }
 
-    // Make sure ETHTOOL reports something sane also before interface is UP.
-    if (pp) {
-        ret = deipce_init_adapter(pp);
-        if (ret)
-            goto unregister_netdev;
-
-        if (dp->features.preempt_ports & (1u << pp->port_num))
-            deipce_preempt_init(pp);
-
-        deipce_set_port_mode(netdev, LM_DOWN);
-
-        if (dp->features.flags & FLX_FRS_FEAT_SHAPER)
-            deipce_shaper_init(pp);
-
-        netdev_dbg(netdev, "DE-IP Core Edge port %u\n", pp->port_num);
-    }
-    else {
-        netdev_dbg(netdev, "DE-IP Core Edge endpoint\n");
-    }
-
     return netdev;
-
-unregister_netdev:
-    // Calls free_netdev.
-    unregister_netdev(netdev);
-    if (pp)
-        pp->netdev = NULL;
-    else
-        dp->netdev = NULL;
-    return NULL;
 
 free_netdev:
     if (pp)
@@ -1253,140 +1207,157 @@ static void deipce_mac_driver_put(struct deipce_dev_priv *dp)
 }
 
 /**
- * Init all netdevices.
- * @param dp Device private data
- * @return 0 on success, or negative error code.
+ * Initialize switch netdevice functionalities.
+ * @param dp Switch privates.
+ * @param config Additional switch configuration time information.
  */
-int deipce_netdev_init(struct deipce_dev_priv *dp,
-                       struct deipce_cfg *frs_cfg)
+int deipce_netdev_init_switch(struct deipce_dev_priv *dp,
+                              struct deipce_switch_config *config)
 {
-    struct deipce_port_priv *pp = NULL;
-    struct deipce_port_cfg *port_cfg = NULL;
     struct net_device *netdev = NULL;
     int ret = -ENODEV;
-    uint16_t data;
-    unsigned int i;
+
+    dev_dbg(dp->this_dev, "%s()\n", __func__);
 
     // Get MAC netdevice and remember it.
-    dp->real_netdev = dev_get_by_name(&init_net, frs_cfg->mac_name);
+    dp->real_netdev = dev_get_by_name(&init_net, config->mac_name);
     if (!dp->real_netdev) {
         dev_err(dp->this_dev, "MAC net_device %s not found\n",
-                frs_cfg->mac_name);
+                config->mac_name);
         return -ENODEV;
     }
 
     // Prevent unloading its driver.
     ret = deipce_mac_driver_get(dp);
     if (ret)
-        goto error_mac_driver_get;
+        goto err_mac_driver_get;
 
-    netdev = deipce_add_netdev(dp, NULL, frs_cfg->if_name);
+    netdev = deipce_add_netdev(dp, NULL, config->ep_name);
+    if (!netdev) {
+        ret = -ENODEV;
+        goto err_endpoint;
+    }
+
+    ret = deipce_netdevif_init(dp);
+    if (ret)
+        goto err_netdevif;
+
+    netdev_dbg(netdev, "DE-IP Core Edge endpoint\n");
+
+    return 0;
+
+err_netdevif:
+    unregister_netdev(dp->netdev);
+    dp->netdev = NULL;
+
+err_endpoint:
+    deipce_mac_driver_put(dp);
+
+err_mac_driver_get:
+    dev_put(dp->real_netdev);
+    dp->real_netdev = NULL;
+
+    return ret;
+}
+
+/**
+ * Initialize switch port netdevice functionalities.
+ * @param dp Switch privates.
+ * @param pp Port privates.
+ * @param config Additional switch port specific configuration time information.
+ */
+int deipce_netdev_init_port(struct deipce_dev_priv *dp,
+                            struct deipce_port_priv *pp,
+                            struct deipce_port_config *config)
+{
+    struct net_device *netdev;
+    int ret = -ENODEV;
+
+    dev_dbg(dp->this_dev, "%s() Port %u\n", __func__, pp->port_num);
+
+    netdev = deipce_add_netdev(dp, pp, config->name);
     if (!netdev)
-        goto error_endpoint;
+        goto err_netdev;
 
-    for (i = 0; i < ARRAY_SIZE(dp->port); i++) {
-        pp = dp->port[i];
+    ret = deipce_init_adapter(pp);
+    if (ret)
+        goto err_adapter;
 
-        if (!pp)
-            continue;
+    if (dp->features.preempt_ports & (1u << pp->port_num))
+        deipce_preempt_init(pp);
 
-        port_cfg = &frs_cfg->port[i];
+    deipce_set_port_mode(netdev, LM_DOWN);
+    deipce_update_ipo_rules(netdev);
 
-        netdev = deipce_add_netdev(dp, pp, port_cfg->if_name);
-        if (!netdev)
-            goto error;
+    if (dp->features.flags & FLX_FRS_FEAT_SHAPER)
+        deipce_shaper_init(pp);
 
-        if (pp->flags & DEIPCE_PORT_CPU) {
-            netdev_dbg(netdev, "Enable management trailer\n");
+    netdev_dbg(netdev, "DE-IP Core Edge port %u\n", pp->port_num);
 
-            data = deipce_read_port_reg(pp, PORT_REG_STATE);
-            data |= PORT_STATE_MANAGEMENT;
-            deipce_write_port_reg(pp, PORT_REG_STATE, data);
-        }
+    dev_dbg(dp->this_dev, "%s() Port %u sysfs\n", __func__, pp->port_num);
 
-        ret = deipce_port_sysfs_init(pp);
+    ret = deipce_port_sysfs_init(pp);
+    if (ret)
+        goto err_port_sysfs;
+
+    if (pp->sched.fsc) {
+        ret = deipce_fsc_sysfs_dev_init(pp->sched.fsc, pp->sched.num,
+                                        &pp->netdev->dev);
         if (ret)
-            goto error;
-
-        if (pp->sched.fsc) {
-            ret = deipce_fsc_sysfs_dev_init(pp->sched.fsc, pp->sched.num,
-                                            &pp->netdev->dev);
-            if (ret)
-                goto error;
-        }
-
-        if (!netdev)
-            goto error;
+            goto err_fsc_sysfs;
     }
 
     return 0;
 
-error:
-    for (i = 0; i < ARRAY_SIZE(dp->port); i++) {
-        struct deipce_port_priv *pp = dp->port[i];
+err_fsc_sysfs:
+    deipce_port_sysfs_cleanup(pp);
 
-        if (!pp)
-            continue;
+err_port_sysfs:
+    deipce_cleanup_adapter(pp);
 
-        if (!pp->netdev)
-            continue;
+err_adapter:
+    unregister_netdev(pp->netdev);
+    pp->netdev = NULL;
 
-        if (pp->sched.fsc)
-            deipce_fsc_sysfs_dev_cleanup(pp->sched.fsc, pp->sched.num,
-                                         &pp->netdev->dev);
-
-        deipce_port_sysfs_cleanup(pp);
-
-        // Unregister, calls destructor which is free_netdev (frees np also).
-        unregister_netdev(pp->netdev);
-        pp->netdev = NULL;
-    }
-
-    // Unregister, calls destructor which is free_netdev (frees np also).
-    unregister_netdev(dp->netdev);
-    dp->netdev = NULL;
-
-error_endpoint:
-    deipce_mac_driver_put(dp);
-
-error_mac_driver_get:
-    dev_put(dp->real_netdev);
-    dp->real_netdev = NULL;
-
-    return -ENODEV;
+err_netdev:
+    return ret;
 }
 
 /**
- * Cleanup netdevices.
- * @param dp Device data
+ * Cleanup switch netdevice functionalities.
+ * @param dp Switch privates.
  */
-void deipce_netdev_cleanup(struct deipce_dev_priv *dp)
+void deipce_netdev_cleanup_switch(struct deipce_dev_priv *dp)
 {
-    unsigned int i;
-
     dev_dbg(dp->this_dev, "%s()\n", __func__);
 
-    for (i = 0; i < ARRAY_SIZE(dp->port); i++) {
-        struct deipce_port_priv *pp = dp->port[i];
+    deipce_netdevif_cleanup(dp);
 
-        if (!pp)
-            continue;
-
-        if (!pp->netdev)
-            continue;
-
-        // Unregister, calls destructor which is free_netdev (frees np also).
-        unregister_netdev(pp->netdev);
-        pp->netdev = NULL;
-    }
-
-    // Unregister, calls destructor which is free_netdev (frees np also).
     unregister_netdev(dp->netdev);
     dp->netdev = NULL;
 
     deipce_mac_driver_put(dp);
     dev_put(dp->real_netdev);
     dp->real_netdev = NULL;
+
+    dev_dbg(dp->this_dev, "%s() done\n", __func__);
+
+    return;
+}
+
+/**
+ * Cleanup switch port netdevice functionalities.
+ * @param dp Switch privates.
+ * @param pp Switch port privates.
+ */
+void deipce_netdev_cleanup_port(struct deipce_dev_priv *dp,
+                                struct deipce_port_priv *pp)
+{
+    dev_dbg(dp->this_dev, "%s()\n", __func__);
+
+    deipce_cleanup_adapter(pp);
+    unregister_netdev(pp->netdev);
+    pp->netdev = NULL;
 
     dev_dbg(dp->this_dev, "%s() done\n", __func__);
 

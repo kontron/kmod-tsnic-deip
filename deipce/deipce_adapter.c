@@ -789,10 +789,10 @@ void deipce_get_adapter_delays(struct deipce_port_priv *pp,
  * Cleanup FRS port adapter handling.
  * @param pp FRS port privates.
  */
-int deipce_cleanup_adapter(struct deipce_port_priv *pp)
+void deipce_cleanup_adapter(struct deipce_port_priv *pp)
 {
     pp->adapter.ops.check_link = NULL;
     pp->adapter.ops.update_link = NULL;
 
-    return 0;
+    return;
 }

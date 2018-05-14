@@ -30,6 +30,8 @@
 #include "deipce_if.h"
 #include "deipce_main.h"
 #include "deipce_adapter.h"
+#include "deipce_fsc_main.h"
+#include "deipce_time.h"
 #include "deipce_ethtool.h"
 
 // mdio was added to struct phy_device in Linux 4.5.
@@ -683,7 +685,7 @@ static int deipce_get_ts_info(struct net_device *netdev,
         SOF_TIMESTAMPING_TX_HARDWARE |
         SOF_TIMESTAMPING_RX_HARDWARE |
         SOF_TIMESTAMPING_RAW_HARDWARE;
-    info->phc_index = dp->phc.index;
+    info->phc_index = deipce_time_get_avail_phc(dp->time, 0);
     info->tx_types =
         (1u << HWTSTAMP_TX_OFF) |
         (1u << HWTSTAMP_TX_ON) |
@@ -694,26 +696,9 @@ static int deipce_get_ts_info(struct net_device *netdev,
         (1u << HWTSTAMP_FILTER_PTP_V2_L2_EVENT);
 
 #if defined(ETHTOOL_STSCLK) || defined(ETHTOOL_SWRKCLK)
-    info->phc_timestamper = info->phc_index;
-    info->phc_index_2nd = -1;
-    info->phc_worker = -1;
-
-    if (dp->ibc) {
-        struct deipce_ibc_phc_info phc_list[DEIPCE_IBC_MAX_CLOCKS] = { NULL };
-        unsigned int time_sel = 0;
-        int ret = deipce_ibc_get_clocks(dp->ibc, phc_list,
-                                        ARRAY_SIZE(phc_list),
-                                        &time_sel, NULL);
-
-        if (ret >= 2) {
-            // In case clocks are in reverse order in MUX.
-            if (phc_list[0].index == dp->phc.index)
-                info->phc_index_2nd = phc_list[1].index;
-            else
-                info->phc_index_2nd = phc_list[0].index;
-            info->phc_worker = phc_list[time_sel].index;
-        }
-    }
+    info->phc_timestamper = deipce_time_get_phc(dp->time, DEIPCE_TIME_SEL_TS);
+    info->phc_index_2nd = deipce_time_get_avail_phc(dp->time, 1);
+    info->phc_worker = deipce_time_get_phc(dp->time, DEIPCE_TIME_SEL_WRK);
 
     netdev_dbg(netdev, "%s() phc %i 2nd %i stamper %i worker %i\n",
                __func__, info->phc_index, info->phc_index_2nd,
@@ -734,14 +719,13 @@ static int deipce_set_ts_clk(struct net_device *netdev,
 {
     struct deipce_netdev_priv *np = netdev_priv(netdev);
     struct deipce_dev_priv *dp = np->dp;
+    int ret;
 
     netdev_dbg(netdev, "%s() PHC %i\n", __func__, clk->phc_index);
 
-    // Timestamper cannot be changed.
-    if (dp->phc.index != clk->phc_index)
-        return -EINVAL;
+    ret = deipce_time_set_phc(dp->time, DEIPCE_TIME_SEL_TS, clk->phc_index);
 
-    return 0;
+    return ret;
 }
 #endif
 
@@ -755,15 +739,17 @@ static int deipce_set_wrk_clk(struct net_device *netdev,
                               const struct ethtool_clock *clk)
 {
     struct deipce_netdev_priv *np = netdev_priv(netdev);
+    struct deipce_port_priv *pp = np->pp;
     struct deipce_dev_priv *dp = np->dp;
     int ret;
 
     netdev_dbg(netdev, "%s() PHC %i\n", __func__, clk->phc_index);
 
-    if (!dp->ibc)
+    if (!pp->sched.fsc)
         return -EOPNOTSUPP;
 
-    ret = deipce_ibc_set_by_phc(dp->ibc, clk->phc_index);
+    ret = deipce_time_set_phc(dp->time, DEIPCE_TIME_SEL_WRK,
+                              clk->phc_index);
 
     netdev_dbg(netdev, "%s() PHC %i ret %i \n",
                 __func__, clk->phc_index, ret);

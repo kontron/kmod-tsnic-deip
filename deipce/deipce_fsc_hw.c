@@ -26,10 +26,10 @@
 
 #include <linux/sched.h>
 #include <linux/platform_device.h>
-#include <linux/ptp_clock_kernel.h>
 
 #include "deipce_types.h"
 #include "deipce_main.h"
+#include "deipce_time.h"
 #include "deipce_fsc_types.h"
 #include "deipce_fsc_if.h"
 #include "deipce_fsc_hw.h"
@@ -469,7 +469,7 @@ int deipce_fsc_calc_start_time(struct deipce_fsc_dev_priv *dp,
      * Calculate future table start time:
      * BaseTime + N x CycleTime - time_advance.
      */
-    ret = dp->phc->gettime64(dp->phc, &cur_time);
+    ret = deipce_time_get_time(dp->time, DEIPCE_TIME_SEL_WRK, &cur_time);
     if (ret)
         return ret;
 
@@ -531,6 +531,43 @@ int deipce_fsc_calc_start_time(struct deipce_fsc_dev_priv *dp,
 }
 
 /**
+ * Append row with zero time, but retaining outputs.
+ * This makes scheduler stop on that row until next cycle,
+ * in case of clock jumps or with inaccuracies (prevents glitches).
+ * @param dp Device privates.
+ * @param sched Scheduler whose administrative table to fix.
+ */
+static int deipce_fsc_fix_last_row(struct deipce_fsc_dev_priv *dp,
+                                   struct deipce_fsc_sched *sched)
+{
+    struct deipce_fsc_table *table = &sched->table[sched->table_num];
+    uint16_t cycles;
+    uint64_t outputs;
+    int ret;
+
+    if (table->num_rows_used == 0)
+        return 0;
+
+    ret = deipce_fsc_read_row(dp, sched->num, table->num,
+                              table->num_rows_used - 1, &cycles, &outputs);
+    if (ret)
+        return ret;
+
+    dev_dbg(&dp->pdev->dev,
+            "%s() Scheduler %u table %u append row %u "
+            "interval %u outputs 0x%llx\n",
+            __func__, sched->num, table->num, table->num_rows_used,
+            0, outputs);
+
+    ret = deipce_fsc_write_row(dp, sched->num, table->num,
+                               table->num_rows_used, 0, outputs);
+    if (ret)
+        return ret;
+
+    return ret;
+}
+
+/**
  * Start new schedule.
  * Alternates between the two schedule tables.
  * Schedule table rows must have been written already.
@@ -551,9 +588,6 @@ static int deipce_fsc_start_schedule(struct deipce_fsc_dev_priv *dp,
     uint16_t dc;
     uint16_t table_gen;
     uint16_t last_cycle;
-
-    if (!dp->phc)
-        return -ENODEV;
 
     dev_dbg(&dp->pdev->dev, "%s() Switch scheduler %u to table %u\n",
             __func__, sched->num, sched->table_num);
@@ -651,6 +685,10 @@ static int deipce_fsc_start_schedule(struct deipce_fsc_dev_priv *dp,
     table_gen = deipce_fsc_read16(dp, FSC_SCHED_TBL_BASE(sched->num,
                                                          sched->table_num) +
                                   FSC_SCHED_TBL_GEN);
+
+    ret = deipce_fsc_fix_last_row(dp, sched);
+    if (ret)
+        return ret;
 
     table_gen |= FSC_SCHED_TBL_GEN_CAN_USE;
     table_gen &= ~FSC_SCHED_TBL_GEN_STOP_AT_LAST;
@@ -783,10 +821,10 @@ int deipce_fsc_cancel_schedule_exchange(struct deipce_fsc_dev_priv *dp,
  * @param src_table_num Source table number.
  * @param dst_table_num Destination table number.
  */
-static int deipce_fsc_copy_schedule_rows(struct deipce_fsc_dev_priv *dp,
-                                         unsigned int sched_num,
-                                         unsigned int src_table_num,
-                                         unsigned int dst_table_num)
+static int deipce_fsc_copy_schedule_table(struct deipce_fsc_dev_priv *dp,
+                                          unsigned int sched_num,
+                                          unsigned int src_table_num,
+                                          unsigned int dst_table_num)
 {
     struct deipce_fsc_sched *sched = &dp->sched[sched_num];
     struct deipce_fsc_table *dst_table = &sched->table[dst_table_num];
@@ -894,8 +932,8 @@ int deipce_fsc_check_schedule(struct deipce_fsc_dev_priv *dp,
     }
 
     sched->oper.param = sched->admin.param;
-    ret = deipce_fsc_copy_schedule_rows(dp, sched_num,
-                                        old_table_num, sched->table_num);
+    ret = deipce_fsc_copy_schedule_table(dp, sched_num,
+                                         old_table_num, sched->table_num);
     if (ret)
         return ret;
 

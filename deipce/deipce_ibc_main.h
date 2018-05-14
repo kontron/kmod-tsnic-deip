@@ -39,13 +39,7 @@ void deipce_ibc_cleanup_driver(void);
 
 struct deipce_ibc_dev_priv *deipce_ibc_of_get_device_by_node(
         struct device_node *node);
-unsigned int deipce_ibc_get_clocks(struct deipce_ibc_dev_priv *dp,
-                                   struct deipce_ibc_phc_info *phc_list,
-                                   unsigned int count,
-                                   unsigned int *time_sel,
-                                   unsigned int *gp_sel);
 int deipce_ibc_set(struct deipce_ibc_dev_priv *dp,
                    unsigned int time_sel, unsigned int gp_sel);
-int deipce_ibc_set_by_phc(struct deipce_ibc_dev_priv *dp, int phc_index);
 
 #endif

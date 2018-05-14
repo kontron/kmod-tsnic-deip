@@ -49,6 +49,8 @@ static inline bool deipce_is_smac_used(struct deipce_dev_priv *dp,
 
 void deipce_reset_port_vlan_config(struct deipce_port_priv *port,
                                    bool member_default);
+unsigned int deipce_get_default_vlan_pcp(struct deipce_port_priv *pp);
+int deipce_set_default_vlan_pcp(struct deipce_port_priv *pp, unsigned int pcp);
 
 enum link_mode deipce_get_ext_link_mode(struct deipce_port_priv *pp);
 

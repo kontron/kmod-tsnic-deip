@@ -28,12 +28,11 @@
 #include <linux/platform_device.h>
 #include <linux/sysfs.h>
 #include <linux/io.h>
-#include <linux/ptp_clock_kernel.h>
 
 #include "deipce_main.h"
 #include "deipce_types.h"
 #include "deipce_ethtool.h"
-#include "deipce_clock_ptp.h"
+#include "deipce_time.h"
 #include "deipce_fsc_types.h"
 #include "deipce_fsc_if.h"
 #include "deipce_fsc_hw.h"
@@ -486,10 +485,18 @@ static int deipce_fsc_sysfs_decode_row(struct deipce_fsc_dev_priv *dp,
     uint32_t cycles_tmp;
     int ret = 0;
 
-    if (user_entry->op != DEIPCE_FSC_SYSFS_ROW_OP_SET_GATES)
-        return -EINVAL;
+    /*
+     * Non-standard behavior: interpret unknown operation as Set-Gate-States,
+     * all gates open. FLEXDE-819.
+     */
+    if (user_entry->op != DEIPCE_FSC_SYSFS_ROW_OP_SET_GATES) {
+        *outputs = dp->output_mask & ~dp->hold_output_mask;
+        ret = 1;
+    }
+    else {
+        *outputs = user_entry->gates;
+    }
 
-    *outputs = user_entry->gates;
     cycles_tmp = user_entry->interval / dp->clock_cycle_length;
 
     /*
@@ -511,6 +518,50 @@ static int deipce_fsc_sysfs_decode_row(struct deipce_fsc_dev_priv *dp,
     return ret;
 }
 
+/**
+ * Read control list entries from scheduler rows.
+ * @param dp FSC device privates.
+ * @param sched Scheduler to read from.
+ * @param table Table to read from.
+ * @param row First row to read.
+ * @param buf Place for writing entries.
+ * @param count Number of bytes room in buf.
+ * @return Number of bytes written to buf, or negative error code.
+ */
+static ssize_t deipce_fsc_sysfs_read_control_list(
+        struct deipce_fsc_dev_priv *dp,
+        struct deipce_fsc_sched *sched,
+        struct deipce_fsc_table *table,
+        unsigned int row,
+        uint8_t *buf,
+        size_t count)
+{
+    size_t pos = 0;
+    uint16_t cycles;
+    uint64_t outputs;
+    int ret = 0;
+
+    for (;
+         row < table->num_rows_used && pos + DEIPCE_FSC_SYSFS_ROW_LEN <= count;
+         row++) {
+        ret = deipce_fsc_read_row(dp, sched->num, table->num, row,
+                                  &cycles, &outputs);
+        if (ret)
+            break;
+
+        ret = deipce_fsc_sysfs_encode_row(dp, cycles, outputs, &buf[pos]);
+        if (ret)
+            break;
+
+        pos += DEIPCE_FSC_SYSFS_ROW_LEN;
+    }
+
+    if (ret)
+        return ret;
+
+    return pos;
+}
+
 static ssize_t deipce_fsc_sysfs_admin_control_list_read(
         struct file *filp, struct kobject *kobj,
         struct bin_attribute *bin_attr,
@@ -522,11 +573,7 @@ static ssize_t deipce_fsc_sysfs_admin_control_list_read(
         container_of(sched, struct deipce_fsc_dev_priv, sched[sched->num]);
     struct deipce_fsc_table *table;
     unsigned int row = 0;
-    uint8_t *p = (uint8_t *)buf;
-    size_t pos = 0;
-    uint16_t cycles;
-    uint64_t outputs;
-    int ret;
+    ssize_t ret;
 
     netdev_dbg(to_net_dev(dev), "%s() sched %u buf %p ofs %llu count %zu\n",
                __func__, sched->num, buf, ofs, count);
@@ -544,28 +591,13 @@ static ssize_t deipce_fsc_sysfs_admin_control_list_read(
 
     table = deipce_fsc_admin_table(sched);
 
-    for (;
-         row < table->num_rows_used && pos + DEIPCE_FSC_SYSFS_ROW_LEN <= count;
-         row++) {
-        ret = deipce_fsc_read_row(dp, sched->num, table->num, row,
-                                  &cycles, &outputs);
-        if (ret)
-            goto out;
-
-        ret = deipce_fsc_sysfs_encode_row(dp, cycles, outputs, &p[pos]);
-        if (ret)
-            goto out;
-
-        pos += DEIPCE_FSC_SYSFS_ROW_LEN;
-    }
+    ret = deipce_fsc_sysfs_read_control_list(dp, sched, table, row,
+                                             (uint8_t *)buf, count);
 
 out:
     mutex_unlock(&dp->lock);
 
-    if (ret)
-        return ret;
-
-    return pos;
+    return ret;
 }
 
 static ssize_t deipce_fsc_sysfs_admin_control_list_write(
@@ -680,11 +712,7 @@ static ssize_t deipce_fsc_sysfs_oper_control_list_read(
         container_of(sched, struct deipce_fsc_dev_priv, sched[sched->num]);
     struct deipce_fsc_table *table;
     unsigned int row;
-    uint8_t *p = (uint8_t *)buf;
-    size_t pos = 0;
-    uint16_t cycles;
-    uint64_t outputs;
-    int ret;
+    ssize_t ret;
 
     netdev_dbg(to_net_dev(dev), "%s() sched %u buf %p ofs %llu count %zu\n",
                __func__, sched->num, buf, ofs, count);
@@ -702,28 +730,13 @@ static ssize_t deipce_fsc_sysfs_oper_control_list_read(
 
     table = deipce_fsc_oper_table(sched);
 
-    for (;
-         row < table->num_rows_used && pos + DEIPCE_FSC_SYSFS_ROW_LEN <= count;
-         row++) {
-        ret = deipce_fsc_read_row(dp, sched->num, table->num, row,
-                                  &cycles, &outputs);
-        if (ret)
-            goto out;
-
-        ret = deipce_fsc_sysfs_encode_row(dp, cycles, outputs, &p[pos]);
-        if (ret)
-            goto out;
-
-        pos += DEIPCE_FSC_SYSFS_ROW_LEN;
-    }
+    ret = deipce_fsc_sysfs_read_control_list(dp, sched, table, row,
+                                             (uint8_t *)buf, count);
 
 out:
     mutex_unlock(&dp->lock);
 
-    if (ret)
-        return ret;
-
-    return pos;
+    return ret;
 }
 
 static DEIPCE_BIN_ATTR_RO(OperControlList,
@@ -1292,7 +1305,8 @@ static ssize_t deipce_fsc_sysfs_supported_list_max_show(
 
     netdev_dbg(to_net_dev(dev), "%s() sched %u\n", __func__, sched->num);
 
-    ret = sprintf(buf, "%u\n", dp->num_rows);
+    // One row is used internally.
+    ret = sprintf(buf, "%u\n", dp->num_rows - 1);
 
     return ret;
 }
@@ -1435,8 +1449,7 @@ static ssize_t deipce_fsc_sysfs_current_time_show(
 
     mutex_lock(&dp->lock);
 
-    if (dp->phc)
-        ret = dp->phc->gettime64(dp->phc, &cur_time);
+    ret = deipce_time_get_time(dp->time, DEIPCE_TIME_SEL_WRK, &cur_time);
 
     mutex_unlock(&dp->lock);
 
@@ -1461,27 +1474,22 @@ static ssize_t deipce_fsc_sysfs_tick_granularity_show(
     struct deipce_fsc_sched *sched = to_deipce_fsc_sched(dev);
     struct deipce_fsc_dev_priv *dp =
         container_of(sched, struct deipce_fsc_dev_priv, sched[sched->num]);
-    uint32_t step_nsec = 0;
-    uint32_t step_subnsec = 0;
+    uint32_t granularity = 0;
     int ret = -EOPNOTSUPP;
 
     netdev_dbg(to_net_dev(dev), "%s() sched %u\n", __func__, sched->num);
 
     mutex_lock(&dp->lock);
 
-    if (dp->phc) {
-        deipce_clock_get_step_size(dp->phc, &step_nsec, &step_subnsec);
-        ret = 0;
-    }
+    ret = deipce_time_get_granularity(dp->time, DEIPCE_TIME_SEL_WRK,
+                                      &granularity);
 
     mutex_unlock(&dp->lock);
 
     if (ret)
         return ret;
 
-    ret = sprintf(buf, "%u\n",
-                  step_nsec * 10u +
-                  (uint32_t)(((uint64_t)step_subnsec * 10u) >> 32));
+    ret = sprintf(buf, "%u\n", granularity);
 
     return ret;
 }
