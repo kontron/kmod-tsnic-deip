@@ -138,7 +138,7 @@ out:
 int deipce_time_get_time(struct deipce_time *dt, enum deipce_time_sel sel,
                          struct timespec64 *time)
 {
-#ifdef CONFIG_PTP_1588_CLOCK
+#if IS_ENABLED(CONFIG_PTP_1588_CLOCK)
     struct flx_frtc_dev_priv *clk = deipce_time_get_clock(dt, sel);
 
     if (!clk)

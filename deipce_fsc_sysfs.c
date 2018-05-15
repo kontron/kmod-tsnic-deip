@@ -1431,7 +1431,7 @@ static DEIPCE_BIN_ATTR_RO(transmissionOverrunTable,
                           &deipce_fsc_sysfs_transmission_overrun_table_read,
                           DEIPCE_MAX_PRIO_QUEUES * sizeof(uint64_t));
 
-#ifdef CONFIG_PTP_1588_CLOCK
+#if IS_ENABLED(CONFIG_PTP_1588_CLOCK)
 
 // CurrentTime
 
@@ -1518,7 +1518,7 @@ static const struct attribute_group *deipce_fsc_sysfs_attr_groups[] = {
             &dev_attr_ConfigPending.attr,
             &dev_attr_ConfigChangeTime.attr,
             &dev_attr_SupportedListMax.attr,
-#ifdef CONFIG_PTP_1588_CLOCK
+#if IS_ENABLED(CONFIG_PTP_1588_CLOCK)
             &dev_attr_CurrentTime.attr,
             &dev_attr_TickGranularity.attr,
 #endif

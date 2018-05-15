@@ -708,7 +708,7 @@ void deipce_rx_frame(struct sk_buff *rx_frame)
         return;
     }
 
-#ifdef CONFIG_NET_SWITCHDEV
+#if IS_ENABLED(CONFIG_NET_SWITCHDEV)
 #if LINUX_VERSION_CODE < KERNEL_VERSION(4,9,0)
     rx_frame->offload_fwd_mark = netdev->offload_fwd_mark;
 #else
@@ -1057,7 +1057,7 @@ static const struct net_device_ops deipce_netdev_ops = {
     .ndo_set_mac_address = &deipce_set_mac_address,
     .ndo_tx_timeout = &deipce_netdev_tx_timeout,
     .ndo_change_mtu = NULL,
-#ifdef CONFIG_NET_SWITCHDEV
+#if IS_ENABLED(CONFIG_NET_SWITCHDEV)
     .ndo_get_phys_port_name = &deipce_switchdev_get_phys_port_name,
     .ndo_bridge_setlink = &switchdev_port_bridge_setlink,
     .ndo_bridge_getlink = &switchdev_port_bridge_getlink,

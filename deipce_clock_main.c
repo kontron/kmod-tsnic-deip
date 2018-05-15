@@ -100,7 +100,7 @@ static int flx_frtc_dev_init(struct platform_device *pdev)
     struct flx_frtc_drv_priv *drv = flx_frtc_get_drv();
     struct flx_frtc_dev_priv *dp = NULL;
     struct resource *res = NULL;
-#ifdef CONFIG_PTP_1588_CLOCK
+#if IS_ENABLED(CONFIG_PTP_1588_CLOCK)
     struct device_node *node = NULL;
 #endif
 
@@ -120,7 +120,7 @@ static int flx_frtc_dev_init(struct platform_device *pdev)
     INIT_LIST_HEAD(&dp->list);
     list_add(&dp->list, &drv->devices);
 
-#ifdef CONFIG_PTP_1588_CLOCK
+#if IS_ENABLED(CONFIG_PTP_1588_CLOCK)
     node = of_parse_phandle(pdev->dev.of_node, "ext-ts", 0);
     if (node) {
         dp->event.fpts = deipce_fpts_of_get_device_by_node(node);
@@ -211,7 +211,7 @@ static struct platform_driver frtc_dev_driver = {
 int __init deipce_clock_init_driver(void)
 {
     struct flx_frtc_drv_priv *drv = flx_frtc_get_drv();
-#ifdef CONFIG_PTP_1588_CLOCK
+#if IS_ENABLED(CONFIG_PTP_1588_CLOCK)
 #ifdef PTP_PTP_OFFSET_PRECISE
     static struct flx_frtc_dev_priv *dp = NULL;
 #endif
@@ -223,7 +223,7 @@ int __init deipce_clock_init_driver(void)
 
     platform_driver_register(&frtc_dev_driver);
 
-#ifdef CONFIG_PTP_1588_CLOCK
+#if IS_ENABLED(CONFIG_PTP_1588_CLOCK)
 #ifdef PTP_PTP_OFFSET_PRECISE
     // Resolve cross-device timestamping setups.
     list_for_each_entry(dp, &drv->devices, list) {

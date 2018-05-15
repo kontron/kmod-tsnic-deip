@@ -26,7 +26,7 @@
 
 #include "deipce_fsc_types.h"
 
-#ifdef CONFIG_SYSFS
+#if IS_ENABLED(CONFIG_SYSFS)
 
 int deipce_fsc_sysfs_dev_init(struct deipce_fsc_dev_priv *dp,
                               unsigned int sched_num,

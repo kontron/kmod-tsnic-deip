@@ -26,7 +26,7 @@
 
 #include "deipce_clock_types.h"
 
-#ifdef CONFIG_PTP_1588_CLOCK
+#if IS_ENABLED(CONFIG_PTP_1588_CLOCK)
 
 int flx_frtc_ptp_init(struct flx_frtc_dev_priv *dp);
 int flx_frtc_ptp_init_devxtstamp(struct flx_frtc_dev_priv *dp);

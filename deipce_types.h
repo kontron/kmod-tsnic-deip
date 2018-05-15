@@ -317,7 +317,7 @@ struct deipce_port_priv {
         uint64_t bitrate[DEIPCE_MAX_PRIO_QUEUES];       ///< rate in bps
     } shaper;
 
-#ifdef CONFIG_DEBUG_FS
+#if IS_ENABLED(CONFIG_DEBUG_FS)
     struct dentry *debugfs_dir;         ///< debugfs port directory
 #endif
 };
@@ -440,7 +440,7 @@ struct deipce_dev_priv {
 
     struct deipce_time *time;           ///< time interface
 
-#ifdef CONFIG_DEBUG_FS
+#if IS_ENABLED(CONFIG_DEBUG_FS)
     struct dentry *debugfs_dir;         ///< debugfs port directory
 #endif
 };
@@ -458,7 +458,7 @@ struct deipce_drv_priv {
 
     uint64_t *crc40_table;              ///< small CRC40 table (4-bit index)
 
-#ifdef CONFIG_DEBUG_FS
+#if IS_ENABLED(CONFIG_DEBUG_FS)
     struct dentry *debugfs_dir;         ///< debugfs driver directory
 #endif
 };

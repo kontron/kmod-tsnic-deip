@@ -50,7 +50,7 @@ struct flx_frtc_dev_priv {
     spinlock_t lock;                    ///< synchronize access
     void __iomem *ioaddr;               ///< component ioaddr
 
-#ifdef CONFIG_PTP_1588_CLOCK
+#if IS_ENABLED(CONFIG_PTP_1588_CLOCK)
     struct ptp_clock_info ptp_info;     ///< Linux PTP hardware clock support
     struct ptp_clock *ptp_clock;        ///< PHC instance
     struct {

@@ -26,7 +26,7 @@
 
 #include "deipce_types.h"
 
-#ifdef CONFIG_DEBUG_FS
+#if IS_ENABLED(CONFIG_DEBUG_FS)
 
 int __init deipce_debugfs_init_driver(struct deipce_drv_priv *drv);
 void deipce_debugfs_cleanup_driver(struct deipce_drv_priv *drv);

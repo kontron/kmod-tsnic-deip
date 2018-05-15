@@ -27,7 +27,7 @@
 #include <linux/jiffies.h>
 #include <linux/version.h>
 
-#ifdef CONFIG_NET_SWITCHDEV
+#if IS_ENABLED(CONFIG_NET_SWITCHDEV)
 
 #include <linux/hashtable.h>
 #include <net/switchdev.h>
