@@ -230,9 +230,7 @@ int __init deipce_clock_init_driver(void)
 {
     struct flx_frtc_drv_priv *drv = flx_frtc_get_drv();
 #if IS_ENABLED(CONFIG_PTP_1588_CLOCK)
-#ifdef PTP_PTP_OFFSET_PRECISE
     static struct flx_frtc_dev_priv *dp = NULL;
-#endif
 #endif
 
     pr_debug(DRV_NAME ": Initialize clock driver\n");
@@ -242,9 +240,9 @@ int __init deipce_clock_init_driver(void)
     platform_driver_register(&frtc_dev_driver);
 
 #if IS_ENABLED(CONFIG_PTP_1588_CLOCK)
-#ifdef PTP_PTP_OFFSET_PRECISE
     // Resolve cross-device timestamping setups.
     list_for_each_entry(dp, &drv->devices, list) {
+#ifdef PTP_PTP_OFFSET_PRECISE
         if (dp->event.trigger_node) {
             dp->event.trigger =
                 deipce_clock_of_get_clock(dp->event.trigger_node);
@@ -265,6 +263,8 @@ int __init deipce_clock_init_driver(void)
             deipce_time_create_by_clocks(dp, NULL, NULL);
             // Ignore errors.
         }
+#else
+	    deipce_time_create_by_clocks(dp, NULL, NULL);
     }
 #endif
 #endif
