@@ -35,6 +35,8 @@ void deipce_fsc_cleanup_driver(void);
 
 struct deipce_fsc_dev_priv *deipce_fsc_of_get_device_by_node(
         struct device_node *node);
+struct deipce_fsc_dev_priv *deipce_fsc_get_device_by_dev(
+        struct device *dev);
 int deipce_fsc_set_time(struct deipce_fsc_dev_priv *fsc,
                         struct deipce_time *dt);
 struct ptp_clock_info *deipce_fsc_get_clock(struct deipce_fsc_dev_priv *fsc);

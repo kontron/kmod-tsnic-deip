@@ -69,6 +69,20 @@ struct deipce_fsc_dev_priv *deipce_fsc_of_get_device_by_node(
     return NULL;
 }
 
+struct deipce_fsc_dev_priv *deipce_fsc_get_device_by_dev(
+        struct device *dev)
+{
+    struct deipce_fsc_drv_priv *drv = deipce_fsc_get_drv_priv();
+    static struct deipce_fsc_dev_priv *dp = NULL;
+
+    list_for_each_entry(dp, &drv->devices, list) {
+        if (&dp->pdev->dev == dev)
+            return dp;
+    }
+
+    return NULL;
+}
+
 /**
  * Inform driver which PHC is used for FSC.
  * @param dp Device privates.
