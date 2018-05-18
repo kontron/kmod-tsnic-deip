@@ -70,6 +70,24 @@ struct flx_frtc_dev_priv *deipce_clock_of_get_clock(struct device_node *node)
 }
 
 /**
+ * Get FRTC of a device.
+ * @param dev device.
+ * @return FRTC or NULL if not an FRTC node or an error.
+ */
+struct flx_frtc_dev_priv *deipce_clock_get_clock_by_dev(struct device *dev)
+{
+    struct flx_frtc_drv_priv *drv = flx_frtc_get_drv();
+    static struct flx_frtc_dev_priv *dp = NULL;
+
+    list_for_each_entry(dp, &drv->devices, list) {
+        if (&dp->pdev->dev == dev)
+            return dp;
+    }
+
+    return NULL;
+}
+
+/**
  * Get FRTC time granularity.
  * @param dp Clock device privates.
  * @param granularity Place for granularity, value is tenths of nanoseconds.

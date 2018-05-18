@@ -30,6 +30,7 @@ struct flx_frtc_dev_priv;
 int __init deipce_clock_init_driver(void);
 void deipce_clock_cleanup_driver(void);
 struct flx_frtc_dev_priv *deipce_clock_of_get_clock(struct device_node *node);
+struct flx_frtc_dev_priv *deipce_clock_get_clock_by_dev(struct device *dev);
 void deipce_clock_get_granularity(struct flx_frtc_dev_priv *dp,
                                   uint32_t *granularity);
 
