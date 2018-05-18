@@ -373,6 +373,24 @@ static int deipce_config_switch_dt(struct deipce_dev_priv *dp,
     return 0;
 }
 
+static int deipce_config_switch_static(struct deipce_dev_priv *dp,
+                                       struct deipce_switch_config *config)
+{
+    struct device *dev;
+
+    config->mac_name = "enp4s0f0";
+    config->ep_name = "SE01";
+
+    dev = bus_find_device_by_name(&platform_bus_type, NULL, "flx_frtc.0");
+    dp->time = deipce_time_get_by_clock(deipce_clock_get_clock_by_dev(dev));
+    if (!dp->time) {
+        dev_err(dp->this_dev, "No time interface\n");
+        return -ENODEV;
+    }
+
+    return 0;
+}
+
 /**
  * Get PHY delays from device tree.
  * @param dp Switch privates.
@@ -524,6 +542,49 @@ static int deipce_config_port_dt(struct deipce_dev_priv *dp,
     return 0;
 }
 
+static int deipce_config_port_static(struct deipce_dev_priv *dp,
+                                     struct deipce_port_priv *pp,
+                                     struct deipce_port_config *config)
+{
+    static const char *devnames[] = {"IE01", "CE01", "CE02", "CE03", "CE04"};
+    static const char *bus_ids[] = {NULL, "deipce-mdio:00", "deipce-mdio:01", "deipce-mdio:02", "deipce-mdio:03"};
+	struct device *fsc_dev = bus_find_device_by_name(&platform_bus_type, NULL, "flx_fsc");
+
+    dev_dbg(dp->this_dev, "%s() Statically configure port %u\n",
+            __func__, pp->port_num);
+
+    if (pp->port_num >= ARRAY_SIZE(devnames))
+        return -ENODEV;
+
+    config->name = devnames[pp->port_num];
+
+    switch (pp->port_num) {
+    case 0:
+        pp->medium_type = DEIPCE_MEDIUM_NOPHY;
+        pp->ext_phy.interface = PHY_INTERFACE_MODE_NA;
+        pp->flags = DEIPCE_PORT_CPU;
+        break;
+    case 1 ... 4:
+        pp->medium_type = DEIPCE_MEDIUM_PHY;
+        pp->ext_phy.interface = PHY_INTERFACE_MODE_RGMII_ID;
+        pp->ext_phy.bus_id = bus_ids[pp->port_num];
+        pp->flags = DEIPCE_HAS_PHY;
+        pp->ext_phy.delay[LM_1000FULL].tx = 92;
+        pp->ext_phy.delay[LM_1000FULL].rx = 207;
+        pp->ext_phy.delay[LM_100FULL].tx = 156;
+        pp->ext_phy.delay[LM_100FULL].rx = 180;
+        pp->ext_phy.delay[LM_10FULL].tx = 1663;
+        pp->ext_phy.delay[LM_10FULL].rx = 1140;
+        pp->sched.num = pp->port_num - 1;
+        pp->sched.fsc = deipce_fsc_get_device_by_dev(fsc_dev);
+        break;
+    default:
+        return -ENODEV;
+    }
+
+    return 0;
+}
+
 /**
  * Create switch port.
  * @param dp Switch privates.
@@ -641,11 +702,13 @@ static int deipce_init_port(struct deipce_dev_priv *dp,
     struct deipce_port_config config = { .name = NULL };
     int ret = -ENOMEM;
 
-    if (port_node) {
+    if (port_node)
         ret = deipce_config_port_dt(dp, pp, port_node, &config);
-        if (ret)
-            goto err_config;
-    }
+    else
+        ret = deipce_config_port_static(dp, pp, &config);
+
+    if (ret)
+        goto err_config;
 
     deipce_init_port_registers(dp, pp);
 
@@ -896,7 +959,10 @@ static int deipce_init_switch(struct deipce_dev_priv *dp)
 
     dev_dbg(dp->this_dev, "%s() Init switch\n", __func__);
 
-    ret = deipce_config_switch_dt(dp, &config);
+    if (dp->this_dev->of_node)
+        ret = deipce_config_switch_dt(dp, &config);
+    else
+        ret = deipce_config_switch_static(dp, &config);
     if (ret)
         goto err_config_switch_dt;
 
