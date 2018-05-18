@@ -15,7 +15,7 @@ ifneq ($(KERNELRELEASE),)
 
 ccflags-y += -Wall
 obj-m += deipce.o
-deipce-y := deipce_main.o \
+deipce-y := deipce_main.o deipce_mdio_main.o \
 	deipce_netdev.o deipce_netdevif.o \
 	deipce_ioctl.o deipce_hw.o deipce_ethtool.o \
 	deipce_adapter.o deipce_sfp.o deipce_preempt.o \

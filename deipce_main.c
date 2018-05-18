@@ -50,6 +50,7 @@
 #include "deipce_fsc_main.h"
 #include "deipce_fpts_main.h"
 #include "deipce_ibc_main.h"
+#include "deipce_mdio_main.h"
 #include "deipce_debugfs.h"
 #include "deipce_main.h"
 
@@ -1207,6 +1208,10 @@ static int __init deipce_init(void)
         // We can work without.
     }
 
+    ret = deipce_mdio_init_driver();
+    if (ret)
+        goto err_mdio_init_driver;
+
     ret = deipce_init_switches();
     if (ret)
         goto err_init_switches;
@@ -1221,6 +1226,8 @@ err_init_switchdev:
     deipce_destroy_switches();
 
 err_init_switches:
+    deipce_mdio_cleanup_driver();
+err_mdio_init_driver:
     deipce_ibc_cleanup_driver();
     deipce_fsc_cleanup_driver();
     deipce_clock_cleanup_driver();
@@ -1265,6 +1272,7 @@ static void __exit deipce_cleanup(void)
 
     deipce_cleanup_crc40(drv);
 
+    deipce_mdio_cleanup_driver();
     deipce_ibc_cleanup_driver();
     deipce_fsc_cleanup_driver();
     deipce_clock_cleanup_driver();
