@@ -265,7 +265,7 @@ static bool deipce_phy_connect(struct net_device *netdev,
 {
     struct phy_device *orig_phydev = netdev->phydev;
 
-    if (!phy->node) {
+    if (!phy->node && !phy->bus_id) {
         netdev_dbg(netdev, "No PHY configured\n");
         return false;
     }
@@ -273,8 +273,13 @@ static bool deipce_phy_connect(struct net_device *netdev,
     // We may be attaching more than one PHY device to netdev.
     netdev->phydev = NULL;
 
-    phy->phydev = of_phy_connect(netdev, phy->node, adjust_link, 0,
-                                 phy->interface);
+    if (phy->node)
+        phy->phydev = of_phy_connect(netdev, phy->node, adjust_link, 0,
+                                     phy->interface);
+    else
+        phy->phydev = phy_connect(netdev, phy->bus_id, adjust_link,
+                                  phy->interface);
+
     if (!phy->phydev) {
         netdev_dbg(netdev, "Failed to attach PHY\n");
         goto out;

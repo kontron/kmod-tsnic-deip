@@ -211,6 +211,7 @@ struct deipce_netdev_priv {
  */
 struct deipce_phy {
     struct device_node *node;           ///< PHY device tree node
+    const char *bus_id;
     phy_interface_t interface;          ///< PHY interface mode to use
     struct phy_device *phydev;          ///< PHY device itself
     uint32_t orig_supported;            ///< supported PHY ETHTOOL features
