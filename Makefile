@@ -32,10 +32,10 @@ deipce-$(CONFIG_SYSFS) += deipce_fsc_sysfs.o deipce_fqtss_sysfs.o \
 
 else
 
-KDIR ?= /lib/modules/$(shell uname -r)/build
+KERNEL_SRC ?= /lib/modules/$(shell uname -r)/build
 
 modules modules_install clean:
-	$(MAKE) -C $(KDIR) M=$$PWD $@
+	$(MAKE) -C $(KERNEL_SRC) M=$$PWD $@
 
 endif
 
