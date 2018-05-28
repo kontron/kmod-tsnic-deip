@@ -69,6 +69,10 @@ MODULE_PARM_DESC(port_ts,
                  "Select between 802.1AS (1) and 1588 (0)"
                  " (bitmask of switch devices, 802.1AS is the default)");
 
+static char *ifname = "eth0";
+module_param(ifname, charp, S_IRUSR);
+MODULE_PARM_DESC(ifname, "Upstream interface name, eg. eth1");
+
 // Driver private data
 static struct deipce_drv_priv deipce_drv_priv = {
     .wq_low = NULL,
@@ -378,7 +382,7 @@ static int deipce_config_switch_static(struct deipce_dev_priv *dp,
 {
     struct device *dev;
 
-    config->mac_name = "enp4s0f0";
+    config->mac_name = ifname;
     config->ep_name = "SE01";
 
     dev = bus_find_device_by_name(&platform_bus_type, NULL, "flx_frtc.0");
