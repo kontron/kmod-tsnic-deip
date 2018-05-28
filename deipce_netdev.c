@@ -1110,7 +1110,7 @@ bool deipce_is_port(struct net_device *netdev)
  */
 static struct net_device *deipce_add_netdev(struct deipce_dev_priv *dp,
                                             struct deipce_port_priv *pp,
-                                            const char *name)
+                                            const char *name, const u8 *mac)
 {
     struct deipce_netdev_priv *np;
     struct net_device *netdev;
@@ -1149,7 +1149,10 @@ static struct net_device *deipce_add_netdev(struct deipce_dev_priv *dp,
 
     SET_NETDEV_DEV(netdev, dp->this_dev);
 
-    eth_hw_addr_random(netdev);
+    if (!is_zero_ether_addr(mac))
+        ether_addr_copy(netdev->dev_addr, mac);
+    else
+        eth_hw_addr_random(netdev);
 
     netdev->base_addr = dp->real_netdev->base_addr;
     netdev->irq = dp->real_netdev->irq;
@@ -1237,7 +1240,7 @@ int deipce_netdev_init_switch(struct deipce_dev_priv *dp,
     if (ret)
         goto err_mac_driver_get;
 
-    netdev = deipce_add_netdev(dp, NULL, config->ep_name);
+    netdev = deipce_add_netdev(dp, NULL, config->ep_name, config->hwaddr);
     if (!netdev) {
         ret = -ENODEV;
         goto err_endpoint;
@@ -1280,7 +1283,7 @@ int deipce_netdev_init_port(struct deipce_dev_priv *dp,
 
     dev_dbg(dp->this_dev, "%s() Port %u\n", __func__, pp->port_num);
 
-    netdev = deipce_add_netdev(dp, pp, config->name);
+    netdev = deipce_add_netdev(dp, pp, config->name, config->hwaddr);
     if (!netdev)
         goto err_netdev;
 

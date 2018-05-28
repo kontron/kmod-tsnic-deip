@@ -38,6 +38,7 @@
 #include <linux/if_vlan.h>
 #include <linux/of.h>
 #include <linux/of_net.h>
+#include <linux/property.h>
 
 #include "deipce_types.h"
 #include "deipce_if.h"
@@ -377,13 +378,26 @@ static int deipce_config_switch_dt(struct deipce_dev_priv *dp,
     return 0;
 }
 
+static void set_hwaddr(u8 *addr, u8 *base, int offset)
+{
+    memset(addr, 0, ETH_ALEN);
+    if (!base)
+        return;
+
+    memcpy(addr, base, ETH_ALEN);
+    put_unaligned_be32(get_unaligned_be32(addr+2) + offset, addr+2);
+}
+
 static int deipce_config_switch_static(struct deipce_dev_priv *dp,
                                        struct deipce_switch_config *config)
 {
     struct device *dev;
+    u8 basemac[ETH_ALEN];
 
     config->mac_name = ifname;
     config->ep_name = "SE01";
+    device_get_mac_address(dp->this_dev, basemac, sizeof(basemac));
+    set_hwaddr(config->hwaddr, basemac, 2);
 
     dev = bus_find_device_by_name(&platform_bus_type, NULL, "flx_frtc.0");
     dp->time = deipce_time_get_by_clock(deipce_clock_get_clock_by_dev(dev));
@@ -552,7 +566,9 @@ static int deipce_config_port_static(struct deipce_dev_priv *dp,
 {
     static const char *devnames[] = {"IE01", "CE01", "CE02", "CE03", "CE04"};
     static const char *bus_ids[] = {NULL, "deipce-mdio:00", "deipce-mdio:01", "deipce-mdio:02", "deipce-mdio:03"};
-	struct device *fsc_dev = bus_find_device_by_name(&platform_bus_type, NULL, "flx_fsc");
+    static const int macoffset[] = {3, 4, 5, 6, 7};
+    struct device *fsc_dev = bus_find_device_by_name(&platform_bus_type, NULL, "flx_fsc");
+    u8 basemac[ETH_ALEN];
 
     dev_dbg(dp->this_dev, "%s() Statically configure port %u\n",
             __func__, pp->port_num);
@@ -561,6 +577,8 @@ static int deipce_config_port_static(struct deipce_dev_priv *dp,
         return -ENODEV;
 
     config->name = devnames[pp->port_num];
+    device_get_mac_address(dp->this_dev, basemac, sizeof(basemac));
+    set_hwaddr(config->hwaddr, basemac, macoffset[pp->port_num]);
 
     switch (pp->port_num) {
     case 0:

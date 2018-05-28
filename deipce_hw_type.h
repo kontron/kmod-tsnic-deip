@@ -41,6 +41,7 @@ struct deipce_dmac_entry {
 struct deipce_switch_config {
     const char *mac_name;               ///< underlying MAC net device name
     const char *ep_name;                ///< default endpoint net device name
+    u8 hwaddr[ETH_ALEN];
 };
 
 /**
@@ -48,6 +49,7 @@ struct deipce_switch_config {
  */
 struct deipce_port_config {
     const char *name;                   ///< default switch port name
+    u8 hwaddr[ETH_ALEN];
 };
 
 #endif
