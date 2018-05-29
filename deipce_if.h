@@ -34,12 +34,12 @@
 /**
  * FRS Switch Management Registers
  */
-#define FRS_REG_SWITCH_MGMT             0x00000000
+#define FRS_REG_SWITCH_MGMT             0x01000000
 
 /**
  * FRS Port Control Registers
  */
-#define FRS_REG_PORT_CTRL               0x00010000
+#define FRS_REG_PORT_CTRL               0x00200000
 #define FRS_REG_PORT_CTRL_SIZE          0x00010000
 #define DEIPCE_PORT_CTRL_ADDR(base, port_num) \
     ((base) - FRS_REG_SWITCH_MGMT + \
@@ -53,7 +53,7 @@
 /**
  * FRS Switch Generics Registers
  */
-#define FRS_REG_GENERIC                 0x6000
+#define FRS_REG_GENERIC                 0xe000
 
 #define FRS_REG_GENERIC_PORT_HIGH       (FRS_REG_GENERIC + 0x000)
 #define FRS_REG_GENERIC_PORT_HIGH_MASK  0xf
