@@ -567,7 +567,7 @@ static int deipce_config_port_static(struct deipce_dev_priv *dp,
     static const char *devnames[] = {"IE01", "CE01", "CE02", "CE03", "CE04"};
     static const char *bus_ids[] = {NULL, "deipce-mdio:00", "deipce-mdio:01", "deipce-mdio:02", "deipce-mdio:03"};
     static const int macoffset[] = {3, 4, 5, 6, 7};
-    struct device *fsc_dev = bus_find_device_by_name(&platform_bus_type, NULL, "flx_fsc");
+    struct device *fsc_dev = bus_find_device_by_name(&platform_bus_type, NULL, "flx_fsc.0");
     u8 basemac[ETH_ALEN];
 
     dev_dbg(dp->this_dev, "%s() Statically configure port %u\n",
