@@ -27,7 +27,7 @@
 #include "deipce_types.h"
 
 #define DRV_NAME        "deipce"
-#define DRV_VERSION     "1.0.0"
+#define DRV_VERSION     "1.3.1"
 
 struct deipce_drv_priv *deipce_get_drv_priv(void);
 
