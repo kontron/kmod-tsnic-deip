@@ -480,6 +480,12 @@ static int deipce_config_port_dt(struct deipce_dev_priv *dp,
 {
     phy_interface_t phy_mode;
     struct of_phandle_args args = { .np = NULL };
+    struct resource res_adapter = {
+        .start = 0,
+        .end = 0,
+    };
+    const __be32 *reg = NULL;
+    int length = 0;
     int ret;
 
     dev_dbg(dp->this_dev, "%s() Configure port %u from device tree\n",
@@ -557,7 +563,33 @@ static int deipce_config_port_dt(struct deipce_dev_priv *dp,
         }
     }
 
+    // Adapters are optional.
+    reg = of_get_property(port_node, "adapter-reg", &length);
+    if (reg && length == 2*sizeof(uint32_t)) {
+        res_adapter.start = be32_to_cpu(reg[0]);
+        res_adapter.end = res_adapter.start + be32_to_cpu(reg[1]) - 1u;
+        pp->adapter.ioaddr = ioremap_nocache(res_adapter.start,
+                                             resource_size(&res_adapter));
+        if (!pp->adapter.ioaddr) {
+            dev_err(dp->this_dev,
+                    "ioremap failed for port %u adapter at 0x%llx/0x%llx\n",
+                    pp->port_num,
+                    (unsigned long long int)res_adapter.start,
+                    (unsigned long long int)resource_size(&res_adapter));
+            goto err_ioremap_adapter;
+        }
+
+        dev_printk(KERN_DEBUG, dp->this_dev,
+                   "Port %u adapter registers at 0x%llx/0x%llx\n",
+                   pp->port_num,
+                   (unsigned long long int)res_adapter.start,
+                   (unsigned long long int)resource_size(&res_adapter));
+    }
+
     return 0;
+
+err_ioremap_adapter:
+    return -ENOMEM;
 }
 
 static int deipce_config_port_static(struct deipce_dev_priv *dp,
@@ -621,10 +653,6 @@ static int deipce_create_port(struct deipce_dev_priv *dp,
         .end = DEIPCE_PORT_CTRL_ADDR(dp->base_addr, port_num) +
             FRS_REG_PORT_CTRL_SIZE - 1,
     };
-    struct resource res_adapter = {
-        .start = 0,
-        .end = 0,
-    };
     int ret = -ENOMEM;
 
     pp = kmalloc(sizeof(*pp), GFP_KERNEL);
@@ -674,31 +702,7 @@ static int deipce_create_port(struct deipce_dev_priv *dp,
                (unsigned long long int)res_port.start,
                (unsigned long long int)resource_size(&res_port));
 
-    // Adapter is optional.
-    if (res_adapter.start) {
-        pp->adapter.ioaddr =
-            ioremap_nocache(res_adapter.start, resource_size(&res_adapter));
-        if (!pp->adapter.ioaddr) {
-            dev_err(dp->this_dev,
-                    "ioremap failed for port %u adapter at 0x%llx/0x%llx\n",
-                    pp->port_num,
-                    (unsigned long long int)res_adapter.start,
-                    (unsigned long long int)resource_size(&res_adapter));
-            goto err_ioremap_adapter;
-        }
-
-        dev_printk(KERN_DEBUG, dp->this_dev,
-                   "Port %u adapter registers at 0x%llx/0x%llx\n",
-                   pp->port_num,
-                   (unsigned long long int)res_adapter.start,
-                   (unsigned long long int)resource_size(&res_adapter));
-    }
-
     return 0;
-
-err_ioremap_adapter:
-    iounmap(pp->ioaddr);
-    pp->ioaddr = NULL;
 
 err_ioremap:
     mutex_destroy(&pp->stats_lock);
