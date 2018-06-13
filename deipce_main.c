@@ -601,6 +601,9 @@ static int deipce_config_port_static(struct deipce_dev_priv *dp,
     static const int macoffset[] = {3, 4, 5, 6, 7};
     struct device *fsc_dev = bus_find_device_by_name(&platform_bus_type, NULL, "flx_fsc.0");
     u8 basemac[ETH_ALEN];
+    struct platform_device *pdev = to_platform_device(dp->this_dev);
+    struct resource *res_adapter = platform_get_resource(pdev, IORESOURCE_MEM, 1);
+    bool has_adapter = false;
 
     dev_dbg(dp->this_dev, "%s() Statically configure port %u\n",
             __func__, pp->port_num);
@@ -631,9 +634,30 @@ static int deipce_config_port_static(struct deipce_dev_priv *dp,
         pp->ext_phy.delay[LM_10FULL].rx = 1140;
         pp->sched.num = pp->port_num - 1;
         pp->sched.fsc = deipce_fsc_get_device_by_dev(fsc_dev);
+        has_adapter = true;
         break;
     default:
         return -ENODEV;
+    }
+
+    // Adapters are optional.
+    if (has_adapter && res_adapter) {
+        pp->adapter.ioaddr = ioremap_nocache(DEIPCE_ADAP_PORT(res_adapter->start, pp->port_num),
+                                             FRS_ADAP_PORT_SIZE);
+        if (!pp->adapter.ioaddr) {
+            dev_err(dp->this_dev,
+                    "ioremap failed for port %u adapter at 0x%llx/0x%llx\n",
+                    pp->port_num,
+                    (unsigned long long int)DEIPCE_ADAP_PORT(res_adapter->start, pp->port_num),
+                    (unsigned long long int)FRS_ADAP_PORT_SIZE);
+            return -ENOMEM;
+        }
+
+        dev_printk(KERN_DEBUG, dp->this_dev,
+                   "Port %u adapter registers at 0x%llx/0x%llx\n",
+                   pp->port_num,
+                   (unsigned long long int)DEIPCE_ADAP_PORT(res_adapter->start, pp->port_num),
+                   (unsigned long long int)FRS_ADAP_PORT_SIZE);
     }
 
     return 0;

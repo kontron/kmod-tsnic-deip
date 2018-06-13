@@ -45,6 +45,11 @@
     ((base) - FRS_REG_SWITCH_MGMT + \
      FRS_REG_PORT_CTRL + ((port_num)) * FRS_REG_PORT_CTRL_SIZE)
 
+#define FRS_ADAP_PORT                   0x00000000
+#define FRS_ADAP_PORT_SIZE              0x00000200
+#define DEIPCE_ADAP_PORT(base, port_num) \
+    ((base) + FRS_ADAP_PORT + ((port_num)) * FRS_ADAP_PORT_SIZE)
+
 /**
  * FRS Switch Management Registers
  */
