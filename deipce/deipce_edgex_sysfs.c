@@ -32,60 +32,8 @@
 #include "deipce_netdevif.h"
 #include "deipce_hw.h"
 #include "deipce_sysfs_common.h"
+#include "deipce_bridge_sysfs.h"
 #include "deipce_edgex_sysfs.h"
-
-/// mgmtTrafficClass
-
-static ssize_t deipce_edgex_sysfs_tc_show(
-        struct device *dev, struct device_attribute *attr,
-        char *buf)
-{
-    struct deipce_port_priv *pp = to_deipce_port_priv(dev);
-    unsigned int tc;
-    int ret;
-
-    netdev_dbg(to_net_dev(dev), "%s()\n", __func__);
-
-    rtnl_lock();
-
-    tc = deipce_get_mgmt_tc(pp);
-
-    rtnl_unlock();
-
-    ret = sprintf(buf, "%u\n", tc);
-
-    return ret;
-}
-
-static ssize_t deipce_edgex_sysfs_tc_store(
-        struct device *dev, struct device_attribute *attr,
-        const char *buf, size_t count)
-{
-    struct deipce_port_priv *pp = to_deipce_port_priv(dev);
-    unsigned int tc;
-    int ret = kstrtouint(buf, 0, &tc);
-
-    netdev_dbg(to_net_dev(dev), "%s() buf %s count %zu\n",
-               __func__, buf, count);
-
-    if (ret)
-        return ret;
-
-    rtnl_lock();
-
-    ret = deipce_set_mgmt_tc(pp, tc);
-
-    rtnl_unlock();
-
-    if (ret)
-        return ret;
-
-    return count;
-}
-
-static DEIPCE_ATTR_RW(mgmtTrafficClass,
-                   &deipce_edgex_sysfs_tc_show,
-                   &deipce_edgex_sysfs_tc_store);
 
 /// mirrorPort
 
@@ -205,13 +153,12 @@ static umode_t deipce_edgex_sysfs_is_visible(struct kobject *kobj,
     return attr->mode;
 }
 
-/// Attribute groups
-static const struct attribute_group *deipce_edgex_sysfs_attr_groups[] = {
+/// Port attribute groups
+static const struct attribute_group *deipce_edgex_port_sysfs_attr_groups[] = {
     &(struct attribute_group){
         .name = "edgex-ext",
         .is_visible = &deipce_edgex_sysfs_is_visible,
         .attrs = (struct attribute*[]){
-            &dev_attr_mgmtTrafficClass.attr,
             &dev_attr_mirrorPort.attr,
             &dev_attr_cutThrough.attr,
             NULL,
@@ -221,26 +168,123 @@ static const struct attribute_group *deipce_edgex_sysfs_attr_groups[] = {
 };
 
 /**
- * Initialize device sysfs files.
- * @param dp Device privates.
+ * Initialize edgex port sysfs files.
+ * @param pp Port privates.
  */
-int deipce_edgex_sysfs_init(struct deipce_port_priv *pp)
+int deipce_edgex_sysfs_init_port(struct deipce_port_priv *pp)
 {
     int ret;
 
     ret = sysfs_create_groups(&pp->netdev->dev.kobj,
-                              deipce_edgex_sysfs_attr_groups);
+                              deipce_edgex_port_sysfs_attr_groups);
     return ret;
 }
 
 /**
- * Cleanup device sysfs files.
- * @param dp Device privates.
+ * Cleanup edgex port sysfs files.
+ * @param pp Port privates.
  */
-void deipce_edgex_sysfs_cleanup(struct deipce_port_priv *pp)
+void deipce_edgex_sysfs_cleanup_port(struct deipce_port_priv *pp)
 {
-    sysfs_remove_groups(&pp->netdev->dev.kobj, deipce_edgex_sysfs_attr_groups);
+    sysfs_remove_groups(&pp->netdev->dev.kobj,
+                        deipce_edgex_port_sysfs_attr_groups);
 
     return;
 }
 
+#ifdef CONFIG_NET_SWITCHDEV
+
+/// mgmtTrafficClass
+
+static ssize_t deipce_edgex_sysfs_tc_show(
+        struct device *dev, struct device_attribute *attr,
+        char *buf)
+{
+    struct deipce_dev_priv *dp = deipce_bridge_sysfs_get_priv(dev);
+    unsigned int tc;
+    int ret;
+
+    netdev_dbg(to_net_dev(dev), "%s()\n", __func__);
+
+    rtnl_lock();
+
+    tc = deipce_get_mgmt_tc(dp);
+
+    rtnl_unlock();
+
+    ret = sprintf(buf, "%u\n", tc);
+
+    return ret;
+}
+
+static ssize_t deipce_edgex_sysfs_tc_store(
+        struct device *dev, struct device_attribute *attr,
+        const char *buf, size_t count)
+{
+    struct deipce_dev_priv *dp = deipce_bridge_sysfs_get_priv(dev);
+    unsigned int tc;
+    int ret = kstrtouint(buf, 0, &tc);
+
+    netdev_dbg(to_net_dev(dev), "%s() buf %s count %zu\n",
+               __func__, buf, count);
+
+    if (ret)
+        return ret;
+
+    rtnl_lock();
+
+    ret = deipce_set_mgmt_tc(dp, tc);
+
+    rtnl_unlock();
+
+    if (ret)
+        return ret;
+
+    return count;
+}
+
+static DEIPCE_ATTR_RW(mgmtTrafficClass,
+                   &deipce_edgex_sysfs_tc_show,
+                   &deipce_edgex_sysfs_tc_store);
+
+/// Bridge attribute groups
+static const struct attribute_group *deipce_edgex_bridge_sysfs_attr_groups[] = {
+    &(struct attribute_group){
+        .name = "edgexbr-ext",
+        .attrs = (struct attribute*[]){
+            &dev_attr_mgmtTrafficClass.attr,
+            NULL,
+        },
+    },
+    NULL,
+};
+
+/**
+ * Initialize edgex bridge sysfs files.
+ * @param dp Switch privates.
+ */
+int deipce_edgex_sysfs_init_switch(struct deipce_dev_priv *dp)
+{
+    struct net_device *master = dp->switchdev.master;
+    int ret;
+
+    ret = sysfs_create_groups(&master->dev.kobj,
+                              deipce_edgex_bridge_sysfs_attr_groups);
+    return ret;
+}
+
+/**
+ * Cleanup edgex bridge sysfs files.
+ * @param dp Switch privates.
+ */
+void deipce_edgex_sysfs_cleanup_switch(struct deipce_dev_priv *dp)
+{
+    struct net_device *master = dp->switchdev.master;
+
+    sysfs_remove_groups(&master->dev.kobj,
+                        deipce_edgex_bridge_sysfs_attr_groups);
+
+    return;
+}
+
+#endif

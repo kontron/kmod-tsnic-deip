@@ -128,6 +128,470 @@ static uint64_t deipce_calc_crc40(struct deipce_drv_priv *drv,
 }
 
 /**
+ * Initialize switch FID support.
+ * @param dp Switch privates.
+ */
+int deipce_init_vlan_fids(struct deipce_dev_priv *dp)
+{
+    if (dp->features.fids > 0) {
+        size_t alloc_size =
+            (dp->features.fids + 1) * sizeof(*dp->vlan.fid_vlan_count);
+
+        dp->vlan.fid_vlan_count = kzalloc(alloc_size, GFP_KERNEL);
+        if (!dp->vlan.fid_vlan_count) {
+            dev_err(dp->this_dev, "Failed to allocate FID VLAN counters\n");
+            return -ENOMEM;
+        }
+    }
+
+    return 0;
+}
+
+/**
+ * Cleanup switch FID support.
+ * @param dp Switch privates.
+ */
+void deipce_cleanup_vlan_fids(struct deipce_dev_priv *dp)
+{
+    if (dp->vlan.fid_vlan_count) {
+        kfree(dp->vlan.fid_vlan_count);
+        dp->vlan.fid_vlan_count = NULL;
+    }
+
+    return;
+}
+
+/**
+ * Get VLAN memberships.
+ * @param dp Switch privates.
+ * @param vid VID number.
+ * @return Bitmask of all ports in VLAN vid.
+ */
+uint16_t deipce_get_vlan_ports(struct deipce_dev_priv *dp, uint16_t vid)
+{
+    return deipce_read_switch_reg(dp, FRS_VLAN_CFG(vid));
+}
+
+/**
+ * Set VLAN memberships.
+ * @param dp Switch privates.
+ * @param vid VID number.
+ * @param port_mask Bitmask of all ports in VLAN vid.
+ */
+static inline void deipce_set_vlan_ports(struct deipce_dev_priv *dp,
+                                         uint16_t vid, uint16_t port_mask)
+{
+    deipce_write_switch_reg(dp, FRS_VLAN_CFG(vid), port_mask);
+}
+
+/**
+ * Check that FID value is valid.
+ * @param dp Switch privates.
+ * @param fid FID value to check.
+ * @return True if fid is valid, false otherwise.
+ */
+bool deipce_is_vlan_fid_valid(struct deipce_dev_priv *dp, uint16_t fid)
+{
+    if (fid == 0 || fid > dp->features.fids)
+        return -EINVAL;
+
+    return true;
+}
+
+/**
+ * Drop all VLAN memberships.
+ * @param dp Switch privates.
+ */
+void deipce_drop_all_vlans(struct deipce_dev_priv *dp)
+{
+    uint16_t vid;
+
+    dev_dbg(dp->this_dev, "%s()\n", __func__);
+
+    for (vid = 0; vid <= VLAN_VID_MASK; vid++) {
+        deipce_set_vlan_ports(dp, vid, 0);
+
+        if (dp->features.fids > 0)
+            deipce_write_switch_reg(dp, FRS_VLAN_FID(vid), 0);
+    }
+
+    return;
+}
+
+/**
+ * Get current PVID for port.
+ * @param pp Port privates.
+ * @return VLAN ID value.
+ */
+uint16_t deipce_get_pvid(struct deipce_port_priv *pp)
+{
+    uint16_t port_vlan = deipce_read_port_reg(pp, PORT_REG_VLAN);
+
+    return port_vlan & VLAN_VID_MASK;
+}
+
+/**
+ * Configure new PVID for port.
+ * @param pp Port privates.
+ * @param vid VLAN ID.
+ */
+void deipce_set_pvid(struct deipce_port_priv *pp, uint16_t vid)
+{
+    // PVID defines also VLAN ID for priority-tagged frames.
+    uint16_t port_vlan0_map = vid & VLAN_VID_MASK;
+    uint16_t port_vlan;
+
+    netdev_dbg(pp->netdev, "%s() Set PVID %hu\n", __func__, vid);
+
+    port_vlan = deipce_read_port_reg(pp, PORT_REG_VLAN);
+
+    port_vlan &= ~VLAN_VID_MASK;
+    port_vlan |= port_vlan0_map;
+    port_vlan |= PORT_VLAN_TAGGED;
+
+    deipce_write_port_reg(pp, PORT_REG_VLAN, port_vlan);
+    deipce_write_port_reg(pp, PORT_REG_VLAN0_MAP, port_vlan0_map);
+
+    return;
+}
+
+/**
+ * Prepare to add a range of VLANs.
+ * After success, call deipce_commit_add_vlans to write changes to HW.
+ * @param dp Switch privates.
+ * @param vid_begin First VID.
+ * @param vid_end Last VID.
+ * @param flags BRIDGE_VLAN_INFO_xxx values.
+ */
+int deipce_prepare_add_vlans(struct deipce_dev_priv *dp,
+                             uint16_t vid_begin, uint16_t vid_end,
+                             uint16_t flags)
+{
+    unsigned int vlan_count = dp->vlan.count;
+    uint16_t port_mask;
+    uint16_t vid;
+
+    dev_dbg(dp->this_dev, "%s() VID %hu .. %hu flags 0x%hx %s%s\n",
+            __func__, vid_begin, vid_end, flags,
+            flags & BRIDGE_VLAN_INFO_PVID ? "PVID " : "",
+            flags & BRIDGE_VLAN_INFO_UNTAGGED ? "untagged " : "");
+
+    // Pretend everything is allocated to FID 1 in case of no support for FIDs.
+    if (dp->features.fids == 0)
+        return 0;
+
+    // Check tagging untagged frames at ingress configuration.
+    if (flags & BRIDGE_VLAN_INFO_PVID) {
+        // There can be only one.
+        if (vid_begin != vid_end)
+            return -EINVAL;
+
+        // PVID tagged at egress is not supported.
+        if (!(flags & BRIDGE_VLAN_INFO_UNTAGGED))
+            return -EINVAL;
+    }
+
+    // Record new VIDs not already in use.
+    bitmap_zero(dp->vlan.new_vids, VLAN_N_VID);
+
+    /*
+     * Enforce VLAN count limit so that each used VID can be allocated to any
+     * available FID at any time.
+     */
+    for (vid = vid_begin; vid <= vid_end; vid++) {
+        port_mask = deipce_get_vlan_ports(dp, vid);
+
+        dev_dbg(dp->this_dev,
+                "%s()  check VID %hu port_mask 0x%hx vlan_count %u\n",
+                __func__, vid, port_mask, vlan_count);
+
+        if (port_mask == 0) {
+            if (vlan_count++ >= dp->features.fids)
+                return -ENOSPC;
+
+            set_bit(vid, dp->vlan.new_vids);
+        }
+    }
+
+    return 0;
+}
+
+/**
+ * Commit new VLANs and update tagging at ingress and egress configuration.
+ * @param dp Switch privates.
+ * @param pp Port privates.
+ * @param vid_begin First VID.
+ * @param vid_end Last VID.
+ * @param flags BRIDGE_VLAN_INFO_xxx values.
+ */
+void deipce_commit_add_vlans(struct deipce_dev_priv *dp,
+                             struct deipce_port_priv *pp,
+                             uint16_t vid_begin, uint16_t vid_end,
+                             uint16_t flags)
+{
+    uint16_t port_mask = 1u << pp->port_num;
+    uint16_t old_port_mask;
+    uint16_t vid;
+    uint16_t fid;
+    uint16_t port_tag;
+    uint16_t old_pvid;
+
+    dev_dbg(dp->this_dev, "%s() %s VID %hu .. %hu flags 0x%hx\n",
+            __func__, netdev_name(pp->netdev), vid_begin, vid_end, flags);
+
+    /*
+     * Configure tagging untagged frames at ingress.
+     * VLAN ID 4095 is used internally for "no PVID" case.
+     */
+    old_pvid = deipce_get_pvid(pp);
+    if (flags & BRIDGE_VLAN_INFO_PVID)
+        deipce_set_pvid(pp, vid_begin);
+    else if (old_pvid >= vid_begin && old_pvid <= vid_end)
+        deipce_set_pvid(pp, VLAN_VID_MASK);
+
+    // Configure VLAN membership, FID and untagging at egress.
+    for (vid = vid_begin; vid <= vid_end; vid++) {
+        // Untagging at egress.
+        port_tag = deipce_read_switch_reg(dp, FRS_VLAN_TAG(vid));
+        if (flags & BRIDGE_VLAN_INFO_UNTAGGED)
+            port_tag |= port_mask;
+        else
+            port_tag &= ~port_mask;
+        deipce_write_switch_reg(dp, FRS_VLAN_TAG(vid), port_tag);
+
+        if (test_bit(vid, dp->vlan.new_vids)) {
+            // New VID. We know there are no ports in this VLAN yet.
+            deipce_set_vlan_ports(dp, vid, port_mask);
+            deipce_get_new_vlan_fid(dp, &fid);
+            deipce_add_vlan_fid(dp, vid, fid);
+        }
+        else {
+            // VID already in use.
+            old_port_mask = deipce_get_vlan_ports(dp, vid);
+            deipce_set_vlan_ports(dp, vid, old_port_mask | port_mask);
+        }
+    }
+
+    return;
+}
+
+/**
+ * Remove port from VLANs.
+ * @param dp Switch privates.
+ * @param pp Port privates.
+ * @param vid_begin First VID.
+ * @param vid_end Last VID.
+ * @param flags BRIDGE_VLAN_INFO_xxx values.
+ */
+void deipce_del_vlans(struct deipce_dev_priv *dp,
+                      struct deipce_port_priv *pp,
+                      uint16_t vid_begin, uint16_t vid_end)
+{
+    uint16_t old_pvid;
+    uint16_t old_port_mask;
+    uint16_t new_port_mask;
+    uint16_t vid;
+    uint16_t fid;
+
+    netdev_dbg(pp->netdev, "%s() DEL %hu .. %hu\n",
+               __func__, vid_begin, vid_end);
+
+    // VLAN membership configuration.
+    for (vid = vid_begin; vid <= vid_end; vid++) {
+        old_port_mask = deipce_get_vlan_ports(dp, vid);
+        new_port_mask = old_port_mask & ~(1u << pp->port_num);
+        deipce_set_vlan_ports(dp, vid, new_port_mask);
+        if (old_port_mask == 1u << pp->port_num) {
+            fid = deipce_get_vlan_fid(dp, vid);
+            deipce_del_vlan_fid(dp, vid, fid);
+        }
+    }
+
+    /*
+     * Handle deleting current PVID, VLAN ID 4095 is used internally
+     * for "no PVID" case.
+     */
+    old_pvid = deipce_get_pvid(pp);
+    if (old_pvid >= vid_begin && old_pvid <= vid_end)
+        deipce_set_pvid(pp, VLAN_VID_MASK);
+
+    return;
+}
+
+/**
+ * Get FID for a new VLAN.
+ * Internally FID numbering starts from zero, but to user it starts from 1.
+ * @param dp Switch privates.
+ * @param fid Place for new FID.
+ */
+int deipce_get_new_vlan_fid(struct deipce_dev_priv *dp, uint16_t *fid)
+{
+    // Pretend everything is allocated to FID 1 in case of no support for FIDs.
+    if (dp->features.fids == 0) {
+        *fid = 1;
+        return 0;
+    }
+
+    /*
+     * Enforce VLAN count limit so that each used VID can be allocated to any
+     * available FID at any time.
+     */
+    if (dp->vlan.count >= dp->features.fids)
+        return -ENOSPC;
+
+    // Allocate each new VLAN from first FID that does not yet have any VLANs.
+    for (*fid = 1; *fid <= dp->features.fids; (*fid)++) {
+        if (dp->vlan.fid_vlan_count[*fid] == 0)
+            return 0;
+    }
+
+    return -ENOSPC;
+}
+
+/**
+ * Get FID a VID is allocated to.
+ * @param dp Switch privates.
+ * @param vid VID number whose FID to get.
+ */
+uint16_t deipce_get_vlan_fid(struct deipce_dev_priv *dp, uint16_t vid)
+{
+    // Pretend everything is allocated to FID 1 in case of no support for FIDs.
+    uint16_t fid = 1;
+
+    if (dp->features.fids > 0) {
+        fid = deipce_read_switch_reg(dp, FRS_VLAN_FID(vid));
+        fid &= dp->features.fids - 1;
+        fid++;
+    }
+
+    return fid;
+}
+
+/**
+ * Add new VLAN to FID.
+ * @param dp Switch privates.
+ * @param vid VID number.
+ * @param fid FID number to allocated VID to.
+ */
+void deipce_add_vlan_fid(struct deipce_dev_priv *dp, uint16_t vid,
+                         uint16_t fid)
+{
+    // Pretend everything is allocated to FID 1 in case of no support for FIDs.
+    if (dp->features.fids == 0)
+        return;
+
+    dp->vlan.count++;
+    dp->vlan.fid_vlan_count[fid]++;
+    deipce_write_switch_reg(dp, FRS_VLAN_FID(vid), fid - 1);
+    deipce_switchdev_add_vlan_fid(dp, vid, fid);
+
+    dev_dbg(dp->this_dev, "%s() add vid %u to fid %u vlans %u total %u\n",
+            __func__, vid, fid, dp->vlan.fid_vlan_count[fid], dp->vlan.count);
+
+    return;
+}
+
+/**
+ * Remove VLAN from FID.
+ * @param dp Switch privates.
+ * @param vid VID number.
+ * @param fid FID number VID is allocated to.
+ */
+void deipce_del_vlan_fid(struct deipce_dev_priv *dp, uint16_t vid,
+                         uint16_t fid)
+{
+    if (dp->features.fids == 0)
+        return;
+
+    dp->vlan.count--;
+    dp->vlan.fid_vlan_count[fid]--;
+    deipce_switchdev_del_vlan_fid(dp, vid, fid);
+
+    dev_dbg(dp->this_dev, "%s() del vid %u from fid %u vlans %u total %u\n",
+            __func__, vid, fid, dp->vlan.fid_vlan_count[fid], dp->vlan.count);
+
+    return;
+}
+
+/*
+ * Reallocate VID to a new FID.
+ * @param dp Switch privates.
+ * @param vid VID number.
+ * @param fid FID number VID is allocated to.
+ */
+int deipce_set_vlan_fid(struct deipce_dev_priv *dp, uint16_t vid, uint16_t fid)
+{
+    uint16_t old_fid;
+
+    if (!deipce_is_vlan_fid_valid(dp, fid))
+        return -EINVAL;
+
+    if (deipce_get_vlan_ports(dp, vid) == 0)
+        return -EINVAL;
+
+    old_fid = deipce_get_vlan_fid(dp, vid);
+
+    dev_dbg(dp->this_dev, "%s() move vid %u from fid %u to fid %u\n",
+            __func__, vid, old_fid, fid);
+
+    if (old_fid == fid)
+        return 0;
+
+    // Order is significant.
+    deipce_add_vlan_fid(dp, vid, fid);
+    deipce_del_vlan_fid(dp, vid, old_fid);
+
+    return 0;
+}
+
+/**
+ * Fill VLAN FID to VID map.
+ * @param dp Switch privates.
+ * @param fid_vid_map Map to fill. Map contains fixed sized list of VIDs
+ * in each FID, like in array fid_vid_map[FID][VLAN], where
+ * FID = 1,2,3 .. FIDS and VLAN = 0,1,2, .. FIDS - 1.
+ * Values are VID numbers, zero denoting an unused entry.
+ * @param first Index of first entry in map.
+ * @param count Number of entries to fill.
+ */
+int deipce_fill_fid_vid_map(struct deipce_dev_priv *dp,
+                            unsigned int *fid_vid_map,
+                            unsigned int first,
+                            unsigned int count)
+{
+    const unsigned int fid_elems = dp->features.fids + 1;
+    const unsigned int end = first + count;
+    unsigned int index;
+    uint16_t vid;
+    uint16_t fid;
+    uint16_t vlan;
+
+    dev_dbg(dp->this_dev, "%s() first %u count %u end %u\n",
+            __func__, first, count, end);
+
+    // FID 0 is invalid.
+    if (first < dp->features.fids)
+        return -EINVAL;
+
+    memset(dp->vlan.fid_vlan_count, 0,
+           fid_elems * sizeof(*dp->vlan.fid_vlan_count));
+    memset(fid_vid_map, 0, count * sizeof(*fid_vid_map));
+
+    for (vid = 1; vid < VLAN_VID_MASK; vid++) {
+        if (deipce_get_vlan_ports(dp, vid) == 0)
+            continue;
+
+        fid = deipce_get_vlan_fid(dp, vid);
+        vlan = dp->vlan.fid_vlan_count[fid]++;
+        index = fid * dp->features.fids + vlan;
+        if (index >= first && index < end)
+            fid_vid_map[index - first] = vid;
+    }
+
+    return 0;
+}
+
+/**
  * Initialize port VLAN configuration to driver defaults.
  * @param port Port privates.
  * @param member_default Whether or not to make port member of default_vlan.
@@ -139,9 +603,13 @@ void deipce_reset_port_vlan_config(struct deipce_port_priv *port,
     const uint16_t default_vlan = 1;
     const uint16_t vlan0_map = default_vlan;
     uint16_t port_vlan = PORT_VLAN_TAGGED | default_vlan;
-    uint16_t port_mask = 0;
-    unsigned int vlan_id;
-    uint16_t data;
+    uint16_t new_port_mask = 0;
+    uint16_t old_port_mask;
+    uint16_t vid;
+    uint16_t fid = 0;
+
+    dev_dbg(dp->this_dev, "%s() port %u member %s\n",
+            __func__, port->port_num, member_default ? "default" : "none");
 
     // Retain PCP bits.
     port_vlan = deipce_read_port_reg(port, PORT_REG_VLAN);
@@ -152,16 +620,30 @@ void deipce_reset_port_vlan_config(struct deipce_port_priv *port,
     deipce_write_port_reg(port, PORT_REG_VLAN, port_vlan);
     deipce_write_port_reg(port, PORT_REG_VLAN0_MAP, vlan0_map);
 
-    for (vlan_id = 0; vlan_id <= VLAN_VID_MASK; vlan_id++) {
-        data = deipce_read_switch_reg(dp, FRS_VLAN_CFG(vlan_id));
+    for (vid = 0; vid <= VLAN_VID_MASK; vid++) {
+        old_port_mask = deipce_get_vlan_ports(dp, vid);
 
-        if ((vlan_id == default_vlan) && member_default)
-            port_mask = data | (1u << port->port_num);
+        if ((vid == default_vlan) && member_default)
+            new_port_mask = old_port_mask | (1u << port->port_num);
         else
-            port_mask = data & ~(1u << port->port_num);
+            new_port_mask = old_port_mask & ~(1u << port->port_num);
 
-        if (port_mask != data)
-            deipce_write_switch_reg(dp, FRS_VLAN_CFG(vlan_id), port_mask);
+        if (new_port_mask != old_port_mask) {
+            deipce_set_vlan_ports(dp, vid, new_port_mask);
+
+            if (dp->features.fids > 0) {
+                if (new_port_mask == 0) {
+                    // VID no longer in use.
+                    fid = deipce_get_vlan_fid(dp, vid);
+                    deipce_del_vlan_fid(dp, vid, fid);
+                }
+                else if (old_port_mask == 0) {
+                    // Default VID taken into use.
+                    deipce_get_new_vlan_fid(dp, &fid);
+                    deipce_add_vlan_fid(dp, vid, fid);
+                }
+            }
+        }
     }
 
     return;
@@ -342,6 +824,25 @@ int deipce_set_port_stp_state(struct net_device *netdev, uint8_t stp_state)
 }
 
 /**
+ * Get FES port STP state.
+ * @param netdev FES port netdevice.
+ * @return Port STP state, BR_STATE_xxx.
+ */
+uint8_t deipce_get_port_stp_state(struct net_device *netdev)
+{
+    struct deipce_netdev_priv *np = netdev_priv(netdev);
+    uint8_t stp_state;
+
+    netdev_dbg(netdev, "%s() Set STP state to %u\n", __func__, stp_state);
+
+    mutex_lock(&np->link_mode_lock);
+    stp_state = np->stp_state;
+    mutex_unlock(&np->link_mode_lock);
+
+    return stp_state;
+}
+
+/**
  * Helper function to wait for FRS to complete fetching next MAC address.
  * @param dp FRS device privates.
  * @return Register MAC_TABLE0 value when finished, negative on error.
@@ -379,8 +880,7 @@ static int deipce_wait_mac_table_transfer(struct deipce_dev_priv *dp)
  * @return Zero on success, negative on error, positive at end of table.
  */
 static int deipce_read_next_mac_addr(struct deipce_dev_priv *dp,
-                                     uint16_t *port_num,
-                                     uint8_t addr[ETH_ALEN])
+                                     struct deipce_dmac_entry *dmac)
 {
     static const uint8_t end_mac_addr[ETH_ALEN] = {
         0xff, 0xff, 0xff, 0xff, 0xff, 0xff
@@ -396,14 +896,23 @@ static int deipce_read_next_mac_addr(struct deipce_dev_priv *dp,
     if (ret < 0)
         return ret;
 
-    *port_num = ret & FRS_MAC_TABLE0_PORT_MASK;
+    dmac->port_num = ret & FRS_MAC_TABLE0_PORT_MASK;
     for (i = 0; i < 3; i++) {
         data = deipce_read_switch_reg(dp, FRS_REG_MAC_TABLE(i + 1));
-        addr[i*2 + 0] = (data >> 0) & 0xff;
-        addr[i*2 + 1] = (data >> 8) & 0xff;
+        dmac->mac_address[i*2 + 0] = (data >> 0) & 0xff;
+        dmac->mac_address[i*2 + 1] = (data >> 8) & 0xff;
     }
 
-    if (memcmp(addr, end_mac_addr, ETH_ALEN) == 0)
+    if (dp->features.fids > 0) {
+        dmac->fid = deipce_read_switch_reg(dp, FRS_REG_MAC_TABLE(4)) &
+            FRS_MAC_TABLE4_FID_MASK;
+        dmac->fid++;
+    }
+    else {
+        dmac->fid = 0;
+    }
+
+    if (memcmp(dmac->mac_address, end_mac_addr, ETH_ALEN) == 0)
         return 1;
 
     return 0;
@@ -436,8 +945,7 @@ int deipce_get_mac_table(struct deipce_dev_priv *dp,
             break;
         }
 
-        ret = deipce_read_next_mac_addr(dp, &dmac.port_num,
-                                        dmac.mac_address);
+        ret = deipce_read_next_mac_addr(dp, &dmac);
         if (ret)
             break;
 
@@ -458,10 +966,12 @@ int deipce_get_mac_table(struct deipce_dev_priv *dp,
 /**
  * Clear MAC table entries for given port or ports.
  * @param dp Device privates.
+ * @param fid FID number whose entries to clear.
  * @param port_mask Bitmask of ports whose MAC entries to clear.
  * @return Zero or negative error code.
  */
-int deipce_clear_mac_table(struct deipce_dev_priv *dp, uint16_t port_mask)
+int deipce_clear_mac_table(struct deipce_dev_priv *dp, uint16_t fid,
+                           uint16_t port_mask)
 {
     unsigned int timeout = 1000;
     uint16_t data;
@@ -471,6 +981,7 @@ int deipce_clear_mac_table(struct deipce_dev_priv *dp, uint16_t port_mask)
     mutex_lock(&dp->common_reg_lock);
 
     deipce_write_switch_reg(dp, FRS_REG_MAC_TABLE_CLEAR_MASK, port_mask);
+    deipce_write_switch_reg(dp, FRS_REG_MAC_TABLE_CLEAR_FID, fid - 1);
 
     data = deipce_read_switch_reg(dp, FRS_REG_GEN);
     deipce_write_switch_reg(dp, FRS_REG_GEN, data | FRS_GEN_CLEAR_MAC_TABLE);
@@ -1094,6 +1605,136 @@ void deipce_set_cutthrough(struct deipce_port_priv *pp, bool enable)
     deipce_write_port_reg(pp, PORT_REG_TX_CT, tx_ct);
 
     mutex_unlock(&np->link_mode_lock);
+
+    return;
+}
+
+/**
+ * Get pointer to specific delays.
+ * @param pp Port privates.
+ * @param delay_type Delay selector.
+ * @return Pointer to delays.
+ */
+static struct deipce_delay *deipce_delay_type_to_delay(
+        struct deipce_port_priv *pp,
+        enum deipce_delay_type delay_type)
+{
+    struct deipce_delay *delay = NULL;
+
+    switch (delay_type) {
+    case DEIPCE_DELAY_PHY:
+        delay = pp->ext_phy.delay;
+        break;
+    case DEIPCE_DELAY_ADAPTER:
+        delay = pp->adapter.delay;
+        break;
+    }
+
+    return delay;
+}
+
+/**
+ * Set port delays.
+ * @param pp Port privates.
+ * @param delay_type Delay selection.
+ * @param dir Direction on which to set the delays.
+ * @param new_delays Array of new delay values in nanoseconds,
+ * indexed by enum link_mode.
+ * Delays for LM_10FULL are always used when link is down (LM_DOWN).
+ */
+void deipce_set_delays(struct deipce_port_priv *pp,
+                       enum deipce_delay_type delay_type,
+                       enum deipce_dir dir,
+                       const unsigned int new_delays[DEIPCE_LINK_MODE_COUNT])
+{
+    struct deipce_delay *delay = deipce_delay_type_to_delay(pp, delay_type);
+    struct deipce_netdev_priv *np = netdev_priv(pp->netdev);
+
+    mutex_lock(&np->link_mode_lock);
+
+    if (delay_type == DEIPCE_DELAY_ADAPTER)
+        pp->flags |= DEIPCE_ADAPTER_DELAY_OVERRIDE;
+
+    switch (dir) {
+    case DEIPCE_DIR_TX:
+        delay[LM_10FULL].tx = new_delays[LM_10FULL];
+        delay[LM_100FULL].tx = new_delays[LM_100FULL];
+        delay[LM_1000FULL].tx = new_delays[LM_1000FULL];
+        delay[LM_DOWN].tx = delay[LM_10FULL].tx;
+        break;
+    case DEIPCE_DIR_RX:
+        delay[LM_10FULL].rx = new_delays[LM_10FULL];
+        delay[LM_100FULL].rx = new_delays[LM_100FULL];
+        delay[LM_1000FULL].rx = new_delays[LM_1000FULL];
+        delay[LM_DOWN].rx = delay[LM_10FULL].tx;
+        break;
+    }
+
+    deipce_update_delays(pp);
+
+    mutex_unlock(&np->link_mode_lock);
+
+    return;
+}
+
+/**
+ * Get port delays.
+ * @param pp Port privates.
+ * @param delay_type Delay selection.
+ * @param dir Direction for which to get the delays.
+ * @param cur_delays Array of current delay values in nanoseconds,
+ * indexed by enum link_mode.
+ */
+void deipce_get_delays(struct deipce_port_priv *pp,
+                       enum deipce_delay_type delay_type,
+                       enum deipce_dir dir,
+                       unsigned int cur_delays[DEIPCE_LINK_MODE_COUNT])
+{
+    const struct deipce_delay *delay =
+        deipce_delay_type_to_delay(pp, delay_type);
+    struct deipce_netdev_priv *np = netdev_priv(pp->netdev);
+
+    mutex_lock(&np->link_mode_lock);
+
+    switch (dir) {
+    case DEIPCE_DIR_TX:
+        cur_delays[LM_DOWN] = delay[LM_DOWN].tx;
+        cur_delays[LM_10FULL] = delay[LM_10FULL].tx;
+        cur_delays[LM_100FULL] = delay[LM_100FULL].tx;
+        cur_delays[LM_1000FULL] = delay[LM_1000FULL].tx;
+        break;
+    case DEIPCE_DIR_RX:
+        cur_delays[LM_DOWN] = delay[LM_DOWN].rx;
+        cur_delays[LM_10FULL] = delay[LM_10FULL].rx;
+        cur_delays[LM_100FULL] = delay[LM_100FULL].rx;
+        cur_delays[LM_1000FULL] = delay[LM_1000FULL].rx;
+        break;
+    }
+
+    mutex_unlock(&np->link_mode_lock);
+
+    return;
+}
+
+/**
+ * Take delay values for current link mode into use.
+ * @param pp Port privates.
+ */
+void deipce_update_delays(struct deipce_port_priv *pp)
+{
+    struct deipce_netdev_priv *np = netdev_priv(pp->netdev);
+    struct deipce_delay adapter_delay;
+
+    deipce_get_adapter_delays(pp, &adapter_delay);
+    pp->cur_delay.tx = adapter_delay.tx + pp->ext_phy.delay[np->link_mode].tx;
+    pp->cur_delay.rx = adapter_delay.rx + pp->ext_phy.delay[np->link_mode].rx;
+
+    netdev_dbg(pp->netdev, "%s() TX/RX delays adapter %lu/%lu PHY %lu/%lu"
+               " total %lu/%lu ns\n",
+               __func__, adapter_delay.tx, adapter_delay.rx,
+               pp->ext_phy.delay[np->link_mode].tx,
+               pp->ext_phy.delay[np->link_mode].rx,
+               pp->cur_delay.tx, pp->cur_delay.rx);
 
     return;
 }

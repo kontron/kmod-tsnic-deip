@@ -28,11 +28,25 @@
 #include <linux/if_ether.h>
 
 /**
+ * Link modes.
+ */
+enum link_mode {
+    LM_DOWN,
+    LM_10FULL,
+    LM_100FULL,
+    LM_1000FULL,
+};
+
+/// Number of link modes
+#define DEIPCE_LINK_MODE_COUNT (LM_1000FULL + 1)
+
+/**
  * FRS dynamic MAC address table entry.
  */
 struct deipce_dmac_entry {
     uint16_t port_num;                  ///< port number
     uint8_t mac_address[ETH_ALEN];      ///< MAC address
+    uint16_t fid;                       ///< FID number
 };
 
 /**

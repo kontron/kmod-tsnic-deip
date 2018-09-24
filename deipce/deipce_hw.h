@@ -47,6 +47,35 @@ static inline bool deipce_is_smac_used(struct deipce_dev_priv *dp,
     return test_bit(DEIPCE_SMAC_USED_BIT(row, col), dp->smac.used);
 }
 
+int deipce_init_vlan_fids(struct deipce_dev_priv *dp);
+void deipce_cleanup_vlan_fids(struct deipce_dev_priv *dp);
+bool deipce_is_vlan_fid_valid(struct deipce_dev_priv *dp, uint16_t fid);
+void deipce_drop_all_vlans(struct deipce_dev_priv *dp);
+uint16_t deipce_get_pvid(struct deipce_port_priv *pp);
+void deipce_set_pvid(struct deipce_port_priv *pp, uint16_t vid);
+int deipce_prepare_add_vlans(struct deipce_dev_priv *dp,
+                             uint16_t vid_begin, uint16_t vid_end,
+                             uint16_t flags);
+void deipce_commit_add_vlans(struct deipce_dev_priv *dp,
+                             struct deipce_port_priv *pp,
+                             uint16_t vid_begin, uint16_t vid_end,
+                             uint16_t flags);
+void deipce_del_vlans(struct deipce_dev_priv *dp,
+                      struct deipce_port_priv *pp,
+                      uint16_t vid_begin, uint16_t vid_end);
+int deipce_get_new_vlan_fid(struct deipce_dev_priv *dp, uint16_t *fid);
+uint16_t deipce_get_vlan_fid(struct deipce_dev_priv *dp, uint16_t vid);
+void deipce_add_vlan_fid(struct deipce_dev_priv *dp, uint16_t vid,
+                         uint16_t fid);
+void deipce_del_vlan_fid(struct deipce_dev_priv *dp, uint16_t vid,
+                         uint16_t fid);
+int deipce_set_vlan_fid(struct deipce_dev_priv *dp, uint16_t vid, uint16_t fid);
+uint16_t deipce_get_vlan_ports(struct deipce_dev_priv *dp, uint16_t vid);
+int deipce_fill_fid_vid_map(struct deipce_dev_priv *dp,
+                            unsigned int *fid_vid_map,
+                            unsigned int first,
+                            unsigned int count);
+
 void deipce_reset_port_vlan_config(struct deipce_port_priv *port,
                                    bool member_default);
 unsigned int deipce_get_default_vlan_pcp(struct deipce_port_priv *pp);
@@ -57,13 +86,15 @@ enum link_mode deipce_get_ext_link_mode(struct deipce_port_priv *pp);
 int deipce_set_port_state(struct net_device *netdev, enum link_mode link_mode);
 
 int deipce_set_port_stp_state(struct net_device *netdev, uint8_t stp_state);
+uint8_t deipce_get_port_stp_state(struct net_device *netdev);
 
 int deipce_get_mac_table(struct deipce_dev_priv *dp,
                          void (*new_entry)(struct deipce_dev_priv *dp,
                                            struct deipce_dmac_entry *dmac,
                                            void *arg),
                          void *arg);
-int deipce_clear_mac_table(struct deipce_dev_priv *dp, uint16_t port_mask);
+int deipce_clear_mac_table(struct deipce_dev_priv *dp, uint16_t fid,
+                           uint16_t port_mask);
 
 int deipce_read_smac_entry(struct deipce_dev_priv *dp,
                            uint16_t row, uint16_t col,
@@ -98,5 +129,15 @@ int deipce_write_port_ipo(struct deipce_port_priv *pp,
 
 bool deipce_get_cutthrough(struct deipce_port_priv *pp);
 void deipce_set_cutthrough(struct deipce_port_priv *pp, bool enable);
+
+void deipce_set_delays(struct deipce_port_priv *pp,
+                       enum deipce_delay_type delay_type,
+                       enum deipce_dir dir,
+                       const unsigned int *delays);
+void deipce_get_delays(struct deipce_port_priv *pp,
+                       enum deipce_delay_type delay_type,
+                       enum deipce_dir dir,
+                       unsigned int *delays);
+void deipce_update_delays(struct deipce_port_priv *pp);
 
 #endif

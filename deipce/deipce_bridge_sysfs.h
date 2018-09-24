@@ -5,7 +5,7 @@
 
    DE-IP Core Edge Linux driver
 
-   Copyright (C) 2013 Flexibilis Oy
+   Copyright (C) 2018 Flexibilis Oy
 
    This program is free software; you can redistribute it and/or modify it
    under the terms of the GNU General Public License version 2
@@ -21,15 +21,25 @@
 
 */
 
-#ifndef DEIPCE_MMIO_H
-#define DEIPCE_MMIO_H
+#ifndef DEIPCE_BRIDGE_SYSFS_H
+#define DEIPCE_BRIDGE_SYSFS_H
 
-int deipce_mmio_init_switch(struct deipce_dev_priv *dp,
-                            struct platform_device *pdev,
-                            struct deipce_cfg *frs_cfg);
-int deipce_mmio_init_ports(struct deipce_dev_priv *dp,
-                           struct deipce_cfg *frs_cfg);
-void deipce_mmio_cleanup_switch(struct deipce_dev_priv *dp);
-void deipce_mmio_cleanup_ports(struct deipce_dev_priv *dp);
+#include "deipce_types.h"
+
+#ifdef CONFIG_SYSFS
+
+int deipce_bridge_sysfs_init(struct deipce_dev_priv *pp);
+void deipce_bridge_sysfs_cleanup(struct deipce_dev_priv *pp);
+struct deipce_dev_priv *deipce_bridge_sysfs_get_priv(struct device *dev);
+
+#else
+
+static inline int deipce_bridge_sysfs_init(struct deipce_dev_priv *pp)
+{ return 0; }
+
+static inline void deipce_bridge_sysfs_cleanup(struct deipce_dev_priv *pp)
+{ return; }
+
+#endif
 
 #endif

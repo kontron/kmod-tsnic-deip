@@ -26,26 +26,28 @@
 
 #include "deipce_fsc_types.h"
 
+struct deipce_port_priv;
+
 #ifdef CONFIG_SYSFS
 
-int deipce_fsc_sysfs_dev_init(struct deipce_fsc_dev_priv *dp,
+int deipce_fsc_sysfs_dev_init(struct deipce_fsc_dev_priv *fsc,
                               unsigned int sched_num,
-                              struct device *dev);
-void deipce_fsc_sysfs_dev_cleanup(struct deipce_fsc_dev_priv *dp,
+                              struct deipce_port_priv *pp);
+void deipce_fsc_sysfs_dev_cleanup(struct deipce_fsc_dev_priv *fsc,
                                   unsigned int sched_num,
-                                  struct device *dev);
+                                  struct deipce_port_priv *pp);
 
 #else
 
-static inline int deipce_fsc_sysfs_dev_init(struct deipce_fsc_dev_priv *dp,
+static inline int deipce_fsc_sysfs_dev_init(struct deipce_fsc_dev_priv *fsc,
                                             unsigned int sched_num,
-                                            struct device *dev)
+                                            struct deipce_port_priv *pp)
 { return 0; }
 
 static inline void deipce_fsc_sysfs_dev_cleanup(
-        struct deipce_fsc_dev_priv *dp,
+        struct deipce_fsc_dev_priv *fsc,
         unsigned int sched_num,
-        struct device *dev);
+        struct deipce_port_priv *pp);
 { return; }
 
 #endif

@@ -247,10 +247,10 @@ static ssize_t deipce_fsc_sysfs_admin_gate_states_store(
     if (ret)
         return ret;
 
-    if (outputs & ~0xffull)
+    if (outputs & ~((1ull << DEIPCE_MAX_PRIO_QUEUES) - 1))
         return -EINVAL;
 
-    outputs &= ~dp->hold_output_mask;
+    outputs &= dp->output_mask & ~dp->hold_output_mask;
 
     mutex_lock(&dp->lock);
 
@@ -405,9 +405,6 @@ struct deipce_fsc_sysfs_control_entry {
 /// Number of bytes in an entry: operation, outputs, time in nanoseconds
 #define DEIPCE_FSC_SYSFS_ROW_LEN sizeof(struct deipce_fsc_sysfs_control_entry)
 
-// Operations
-#define DEIPCE_FSC_SYSFS_ROW_OP_SET_GATES 0x00  ///< set gate states (outputs)
-
 /**
  * Check validity of control list read/write operation.
  * We only support reading/writing integral number of whole entries at once.
@@ -443,25 +440,69 @@ static int deipce_fsc_sysfs_validate_control_list_op(
 }
 
 /**
+ * Determine hold signal value from previous FSC row.
+ * @param dp Device privates.
+ * @param sched Scheduler instance.
+ * @param table_num Table number.
+ * @param row_num Row number for which to get the hold signal value,
+ * from its predecessor.
+ * @param hold Place for hold signal value.
+ */
+static int deipce_fsc_sysfs_get_prev_hold(struct deipce_fsc_dev_priv *dp,
+                                          struct deipce_fsc_sched *sched,
+                                          unsigned int table_num,
+                                          unsigned int row_num,
+                                          bool *hold)
+{
+    uint16_t cycles;
+    uint64_t outputs;
+    int ret;
+
+    if (row_num == 0) {
+        // Wrapping hold is checked and adjusted for at config change time.
+        *hold = false;
+    }
+    else {
+        ret = deipce_fsc_read_row(dp, sched->num, table_num, row_num - 1,
+                                  &cycles, &outputs);
+        if (ret)
+            return ret;
+
+        *hold = outputs & sched->hold_output_mask;
+    }
+
+    return 0;
+}
+
+/**
  * Encode single row into sysfs format.
  * @param dp FSC device privates.
+ * @param sched Scheduler instance.
  * @param cycles Row time in number of clock cycles.
  * @param outputs Bitmask of outputs.
+ * @param hold Pointer to previous hold signal value, which will be updated.
  * @param buf Pointer to buffer to write entry to,
  * with room for at least DEIPCE_FSC_SYSFS_ROW_LEN bytes.
  */
-static int deipce_fsc_sysfs_encode_row(struct deipce_fsc_dev_priv *dp,
-                                       uint16_t cycles,
-                                       uint64_t outputs,
-                                       uint8_t *buf)
+static int deipce_fsc_sysfs_encode_row(
+        struct deipce_fsc_dev_priv *dp,
+        struct deipce_fsc_sched *sched,
+        uint16_t cycles,
+        uint64_t outputs,
+        bool *hold,
+        struct deipce_fsc_sysfs_control_entry *user_entry)
 {
-    struct deipce_fsc_sysfs_control_entry *user_entry =
-        (struct deipce_fsc_sysfs_control_entry *)buf;
-
     user_entry->interval = cycles * dp->clock_cycle_length;
-    user_entry->op = DEIPCE_FSC_SYSFS_ROW_OP_SET_GATES;
+    if (!*hold && (outputs & sched->hold_output_mask))
+        user_entry->op = DEIPCE_FSC_OP_HOLD_MAC;
+    else if (*hold && !(outputs & sched->hold_output_mask))
+        user_entry->op = DEIPCE_FSC_OP_RELEASE_MAC;
+    else
+        user_entry->op = DEIPCE_FSC_OP_SET_GATES;
     user_entry->gates = (uint8_t)outputs;
     user_entry->padding = 0;
+
+    *hold = outputs & sched->hold_output_mask;
 
     return 0;
 }
@@ -469,33 +510,48 @@ static int deipce_fsc_sysfs_encode_row(struct deipce_fsc_dev_priv *dp,
 /**
  * Decode single row from sysfs format.
  * @param dp FSC device privates.
+ * @param sched Scheduler instance.
  * @param cycles Place for row time in number of clock cycles.
  * @param outputs Place for bitmask of outputs.
+ * @param hold Pointer to previous hold signal value, which will be updated.
  * @param buf Pointer to buffer to read entry from,
  * with at least DEIPCE_FSC_SYSFS_ROW_LEN bytes.
  * @return Zero on success, 1 when accepted but modified, or negative on error.
  */
-static int deipce_fsc_sysfs_decode_row(struct deipce_fsc_dev_priv *dp,
-                                       uint16_t *cycles,
-                                       uint64_t *outputs,
-                                       const uint8_t *buf)
+static int deipce_fsc_sysfs_decode_row(
+        struct deipce_fsc_dev_priv *dp,
+        struct deipce_fsc_sched *sched,
+        uint16_t *cycles,
+        uint64_t *outputs,
+        bool *hold,
+        const struct deipce_fsc_sysfs_control_entry *user_entry)
 {
-    const struct deipce_fsc_sysfs_control_entry *user_entry =
-        (const struct deipce_fsc_sysfs_control_entry *)buf;
     uint32_t cycles_tmp;
     int ret = 0;
 
-    /*
-     * Non-standard behavior: interpret unknown operation as Set-Gate-States,
-     * all gates open. FLEXDE-819.
-     */
-    if (user_entry->op != DEIPCE_FSC_SYSFS_ROW_OP_SET_GATES) {
+    *outputs = user_entry->gates;
+
+    switch (user_entry->op) {
+    case DEIPCE_FSC_OP_SET_GATES:
+        if (*hold)
+            *outputs |= sched->hold_output_mask;
+        break;
+    case DEIPCE_FSC_OP_HOLD_MAC:
+        *outputs |= sched->hold_output_mask;
+        break;
+    case DEIPCE_FSC_OP_RELEASE_MAC:
+        break;
+    default:
+        /*
+         * Non-standard behavior: interpret unknown operation as
+         * Set-Gate-States, all gates open. FLEXDE-819.
+         */
         *outputs = dp->output_mask & ~dp->hold_output_mask;
         ret = 1;
     }
-    else {
-        *outputs = user_entry->gates;
-    }
+
+    // Record actual hold signal value.
+    *hold = *outputs & sched->hold_output_mask;
 
     cycles_tmp = user_entry->interval / dp->clock_cycle_length;
 
@@ -533,13 +589,18 @@ static ssize_t deipce_fsc_sysfs_read_control_list(
         struct deipce_fsc_sched *sched,
         struct deipce_fsc_table *table,
         unsigned int row,
-        uint8_t *buf,
+        struct deipce_fsc_sysfs_control_entry *user_entry,
         size_t count)
 {
+    bool hold;
     size_t pos = 0;
     uint16_t cycles;
     uint64_t outputs;
     int ret = 0;
+
+    ret = deipce_fsc_sysfs_get_prev_hold(dp, sched, table->num, row, &hold);
+    if (ret)
+        return ret;
 
     for (;
          row < table->num_rows_used && pos + DEIPCE_FSC_SYSFS_ROW_LEN <= count;
@@ -549,11 +610,13 @@ static ssize_t deipce_fsc_sysfs_read_control_list(
         if (ret)
             break;
 
-        ret = deipce_fsc_sysfs_encode_row(dp, cycles, outputs, &buf[pos]);
+        ret = deipce_fsc_sysfs_encode_row(dp, sched, cycles, outputs, &hold,
+                                          user_entry);
         if (ret)
             break;
 
         pos += DEIPCE_FSC_SYSFS_ROW_LEN;
+        user_entry++;
     }
 
     if (ret)
@@ -572,6 +635,8 @@ static ssize_t deipce_fsc_sysfs_admin_control_list_read(
     struct deipce_fsc_dev_priv *dp =
         container_of(sched, struct deipce_fsc_dev_priv, sched[sched->num]);
     struct deipce_fsc_table *table;
+    struct deipce_fsc_sysfs_control_entry *user_entry =
+        (struct deipce_fsc_sysfs_control_entry *)buf;
     unsigned int row = 0;
     ssize_t ret;
 
@@ -590,9 +655,8 @@ static ssize_t deipce_fsc_sysfs_admin_control_list_read(
         goto out;
 
     table = deipce_fsc_admin_table(sched);
-
     ret = deipce_fsc_sysfs_read_control_list(dp, sched, table, row,
-                                             (uint8_t *)buf, count);
+                                             user_entry, count);
 
 out:
     mutex_unlock(&dp->lock);
@@ -613,8 +677,10 @@ static ssize_t deipce_fsc_sysfs_admin_control_list_write(
     bool pending;
     unsigned int first_row;
     unsigned int row;
-    const uint8_t *p = (uint8_t *)buf;
+    const struct deipce_fsc_sysfs_control_entry *user_entry =
+        (const struct deipce_fsc_sysfs_control_entry *)buf;
     size_t pos = 0;
+    bool hold = false;
     uint16_t cycles;
     uint64_t outputs;
     bool adapted = false;
@@ -632,9 +698,13 @@ static ssize_t deipce_fsc_sysfs_admin_control_list_write(
     for (row = first_row;
          row < dp->num_rows && pos + DEIPCE_FSC_SYSFS_ROW_LEN <= count;
          row++) {
-        ret = deipce_fsc_sysfs_decode_row(dp, &cycles, &outputs, &p[pos]);
+        ret = deipce_fsc_sysfs_decode_row(dp, sched, &cycles, &outputs, &hold,
+                                          user_entry);
         if (ret < 0)
             return ret;
+
+        pos += DEIPCE_FSC_SYSFS_ROW_LEN;
+        user_entry++;
     }
 
     mutex_lock(&dp->lock);
@@ -644,23 +714,33 @@ static ssize_t deipce_fsc_sysfs_admin_control_list_write(
         goto out;
 
     table = deipce_fsc_admin_table(sched);
+    ret = deipce_fsc_sysfs_get_prev_hold(dp, sched, table->num, first_row,
+                                         &hold);
+    if (ret)
+        goto out;
 
     pos = 0;
+    user_entry = (const struct deipce_fsc_sysfs_control_entry *)buf;
     for (row = first_row;
          row < dp->num_rows && pos + DEIPCE_FSC_SYSFS_ROW_LEN <= count;
          row++) {
-        ret = deipce_fsc_sysfs_decode_row(dp, &cycles, &outputs, &p[pos]);
+        ret = deipce_fsc_sysfs_decode_row(dp, sched, &cycles, &outputs, &hold,
+                                          user_entry);
         if (ret < 0)
             goto out;
         else if (ret > 0)
             adapted = true;
 
-        pos += DEIPCE_FSC_SYSFS_ROW_LEN;
-
         ret = deipce_fsc_write_row(dp, sched->num, table->num, row,
                                    cycles, outputs);
         if (ret)
             goto out;
+
+        // Record original gate operations.
+        table->gate_op[row] = user_entry->op;
+
+        pos += DEIPCE_FSC_SYSFS_ROW_LEN;
+        user_entry++;
     }
 
     if (row >= dp->num_rows) {
@@ -711,6 +791,8 @@ static ssize_t deipce_fsc_sysfs_oper_control_list_read(
     struct deipce_fsc_dev_priv *dp =
         container_of(sched, struct deipce_fsc_dev_priv, sched[sched->num]);
     struct deipce_fsc_table *table;
+    struct deipce_fsc_sysfs_control_entry *user_entry =
+        (struct deipce_fsc_sysfs_control_entry *)buf;
     unsigned int row;
     ssize_t ret;
 
@@ -729,9 +811,8 @@ static ssize_t deipce_fsc_sysfs_oper_control_list_read(
         goto out;
 
     table = deipce_fsc_oper_table(sched);
-
     ret = deipce_fsc_sysfs_read_control_list(dp, sched, table, row,
-                                             (uint8_t *)buf, count);
+                                             user_entry, count);
 
 out:
     mutex_unlock(&dp->lock);
@@ -1539,16 +1620,22 @@ static const struct attribute_group *deipce_fsc_sysfs_attr_groups[] = {
  * Initialize device sysfs files.
  * @param dp Device privates.
  */
-int deipce_fsc_sysfs_dev_init(struct deipce_fsc_dev_priv *dp,
+int deipce_fsc_sysfs_dev_init(struct deipce_fsc_dev_priv *fsc,
                               unsigned int sched_num,
-                              struct device *dev)
+                              struct deipce_port_priv *pp)
 {
+    struct deipce_dev_priv *dp = pp->dp;
+    struct deipce_fsc_sched *sched = &fsc->sched[sched_num];
     int ret = 0;
 
-    netdev_dbg(to_net_dev(dev), "%s() Init sysfs for FSC %s scheduler %u\n",
-               __func__, dev_name(&dp->pdev->dev), sched_num);
+    netdev_dbg(pp->netdev, "%s() Init sysfs for FSC %s scheduler %u\n",
+               __func__, dev_name(&fsc->pdev->dev), sched_num);
 
-    ret = sysfs_create_groups(&dev->kobj, deipce_fsc_sysfs_attr_groups);
+    if (dp->features.preempt_ports & (1u << pp->port_num))
+        sched->hold_output_mask = fsc->hold_output_mask;
+
+    ret = sysfs_create_groups(&pp->netdev->dev.kobj,
+                              deipce_fsc_sysfs_attr_groups);
     if (ret)
         return ret;
 
@@ -1559,14 +1646,14 @@ int deipce_fsc_sysfs_dev_init(struct deipce_fsc_dev_priv *dp,
  * Cleanup device sysfs files.
  * @param dp Device privates.
  */
-void deipce_fsc_sysfs_dev_cleanup(struct deipce_fsc_dev_priv *dp,
+void deipce_fsc_sysfs_dev_cleanup(struct deipce_fsc_dev_priv *fsc,
                                   unsigned int sched_num,
-                                  struct device *dev)
+                                  struct deipce_port_priv *pp)
 {
-    netdev_dbg(to_net_dev(dev), "%s() Cleanup sysfs for FSC %s scheduler %u\n",
-               __func__, dev_name(&dp->pdev->dev), sched_num);
+    netdev_dbg(pp->netdev, "%s() Cleanup sysfs for FSC %s scheduler %u\n",
+               __func__, dev_name(&fsc->pdev->dev), sched_num);
 
-    sysfs_remove_groups(&dev->kobj, deipce_fsc_sysfs_attr_groups);
+    sysfs_remove_groups(&pp->netdev->dev.kobj, deipce_fsc_sysfs_attr_groups);
 
     return;
 }

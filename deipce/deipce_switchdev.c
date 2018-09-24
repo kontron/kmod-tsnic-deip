@@ -51,6 +51,7 @@
 #include "deipce_if.h"
 #include "deipce_hw.h"
 #include "deipce_netdev.h"
+#include "deipce_bridge_sysfs.h"
 #include "deipce_switchdev.h"
 
 /**
@@ -246,9 +247,7 @@ static int deipce_switchdev_port_attr_get(struct net_device *netdev,
         ret = deipce_switchdev_id(dp, &attr->u.ppid);
         break;
     case SWITCHDEV_ATTR_ID_PORT_STP_STATE:
-        mutex_lock(&np->link_mode_lock);
-        attr->u.stp_state = np->stp_state;
-        mutex_unlock(&np->link_mode_lock);
+        attr->u.stp_state = deipce_get_port_stp_state(netdev);
         ret = 0;
         break;
     case SWITCHDEV_ATTR_ID_PORT_BRIDGE_FLAGS:
@@ -281,7 +280,6 @@ static int deipce_switchdev_port_attr_set(struct net_device *netdev,
     int ret = -EOPNOTSUPP;
     struct deipce_netdev_priv *np = netdev_priv(netdev);
     struct deipce_dev_priv *dp = np->dp;
-    struct deipce_port_priv *pp = np->pp;
 
     switch (attr->id) {
     case SWITCHDEV_ATTR_ID_PORT_STP_STATE:
@@ -297,18 +295,10 @@ static int deipce_switchdev_port_attr_set(struct net_device *netdev,
         netdev_dbg(netdev, "%s() set flags to 0x%lx %s\n",
                    __func__, attr->u.brport_flags,
                    deipce_switchdev_trans_str(trans));
-        // Do not allow learning and flooding unicast on internal ports.
-        if (pp->flags & DEIPCE_PORT_CPU) {
-            if (attr->u.brport_flags &
-                (BR_LEARNING | BR_LEARNING_SYNC | BR_FLOOD))
-                return -EINVAL;
-        }
-        else {
-            // Learning and flooding cannot be disabled.
-            if ((attr->u.brport_flags & (BR_LEARNING | BR_FLOOD)) !=
-                (BR_LEARNING | BR_FLOOD))
-                return -EINVAL;
-        }
+        // Learning and flooding cannot be disabled.
+        if ((attr->u.brport_flags & (BR_LEARNING | BR_FLOOD)) !=
+            (BR_LEARNING | BR_FLOOD))
+            return -EINVAL;
         if (!switchdev_trans_ph_prepare(trans))
             np->switchdev.brport_flags = attr->u.brport_flags;
         ret = 0;
@@ -412,88 +402,24 @@ static int deipce_switchdev_port_vlan_add(
         const struct switchdev_obj_port_vlan *vlan,
         struct switchdev_trans *trans)
 {
-    int ret = -EINVAL;
+    int ret = 0;
     struct deipce_netdev_priv *np = netdev_priv(netdev);
     struct deipce_port_priv *pp = np->pp;
     struct deipce_dev_priv *dp = np->dp;
-    bool port_vlan_change = false;
-    uint16_t port_vlan = 0;
-    uint16_t port_vlan0_map = 0;
-    uint16_t port_mask = 0;
-    uint16_t vid = 0;
 
     netdev_dbg(netdev, "%s() ADD %u .. %u flags 0x%x ph %s\n",
                __func__, vlan->vid_begin, vlan->vid_end, vlan->flags,
                deipce_switchdev_trans_str(trans));
 
-    // VLAN membership configuration. Cannot fail.
-    if (!switchdev_trans_ph_prepare(trans)) {
-        for (vid = vlan->vid_begin; vid <= vlan->vid_end; vid++) {
-            port_mask = deipce_read_switch_reg(dp, FRS_VLAN_CFG(vid));
-            port_mask |= 1u << pp->port_num;
-            deipce_write_switch_reg(dp, FRS_VLAN_CFG(vid), port_mask);
-        }
+    if (switchdev_trans_ph_prepare(trans)) {
+        ret = deipce_prepare_add_vlans(dp, vlan->vid_begin, vlan->vid_end,
+                                       vlan->flags);
+    }
+    else {
+        deipce_commit_add_vlans(dp, pp, vlan->vid_begin, vlan->vid_end,
+                                vlan->flags);
     }
 
-    // VLAN flags are BRIDGE_VLAN_INFO_xxx values.
-
-    // Untagging tagged frames at egress configuration.
-    if (vlan->flags & BRIDGE_VLAN_INFO_UNTAGGED) {
-        port_vlan = deipce_read_port_reg(pp, PORT_REG_VLAN);
-
-        /*
-         * FES removes VLAN tag from either only the default VLAN or
-         * from all VLANs at egress.
-         * VLAN ID 4095 is actually not allowed.
-         */
-        if (vlan->vid_begin <= 1 && vlan->vid_end >= VLAN_VID_MASK - 1) {
-            port_vlan0_map = vlan->vid_begin;
-            port_vlan &= ~PORT_VLAN_TAGGED;
-            port_vlan |= VLAN_VID_MASK;
-        }
-        else if (vlan->vid_begin == vlan->vid_end) {
-            port_vlan0_map = vlan->vid_begin & VLAN_VID_MASK;
-            port_vlan |= PORT_VLAN_TAGGED;
-            port_vlan &= ~VLAN_VID_MASK;
-            port_vlan |= port_vlan0_map;
-        }
-        else {
-            // FES does not support removing tag from arbitrary VLANs.
-            ret = -EINVAL;
-            goto error;
-        }
-
-        port_vlan_change = true;
-    }
-
-    // Tagging untagged frames at ingress configuration.
-    if (vlan->flags & BRIDGE_VLAN_INFO_PVID) {
-        // There can be only one.
-        if (vlan->vid_begin != vlan->vid_end) {
-            ret = -EINVAL;
-            goto error;
-        }
-
-        port_vlan = deipce_read_port_reg(pp, PORT_REG_VLAN);
-
-         // PVID defines also VLAN ID for frames with VLAN ID 0.
-        port_vlan0_map = vlan->vid_begin & VLAN_VID_MASK;
-
-        port_vlan |= PORT_VLAN_TAGGED;
-        port_vlan &= ~VLAN_VID_MASK;
-        port_vlan |= port_vlan0_map;
-
-        port_vlan_change = true;
-    }
-
-    if (!switchdev_trans_ph_prepare(trans) && port_vlan_change) {
-        deipce_write_port_reg(pp, PORT_REG_VLAN, port_vlan);
-        deipce_write_port_reg(pp, PORT_REG_VLAN0_MAP, port_vlan0_map);
-    }
-
-    ret = 0;
-
-error:
     return ret;
 }
 
@@ -608,7 +534,7 @@ out:
 }
 
 /**
- * Add VLAN entries.
+ * Delete VLAN entries.
  * This updates FES VLAN configuration.
  * @param netdev FES port netdevice.
  * @param vlan VLAN information.
@@ -621,20 +547,11 @@ static int deipce_switchdev_port_vlan_del(
     struct deipce_netdev_priv *np = netdev_priv(netdev);
     struct deipce_port_priv *pp = np->pp;
     struct deipce_dev_priv *dp = np->dp;
-    uint16_t port_mask = 0;
-    uint16_t vid = 0;
 
     netdev_dbg(netdev, "%s() DEL %u .. %u flags 0x%x\n",
                __func__, vlan->vid_begin, vlan->vid_end, vlan->flags);
 
-    // VLAN membership configuration.
-    for (vid = vlan->vid_begin; vid <= vlan->vid_end; vid++) {
-        port_mask = deipce_read_switch_reg(dp, FRS_VLAN_CFG(vid));
-        port_mask &= ~(1u << pp->port_num);
-        deipce_write_switch_reg(dp, FRS_VLAN_CFG(vid), port_mask);
-    }
-
-    // Port VLAN configuration: nothing to do.
+    deipce_del_vlans(dp, pp, vlan->vid_begin, vlan->vid_end);
 
     return 0;
 }
@@ -685,8 +602,6 @@ static int deipce_switchdev_port_fdb_dump(struct net_device *netdev,
     struct frs_smac_table_entry entry = { .config = 0 };
     unsigned int row = 0;
     unsigned int col = 0;
-    struct deipce_switchdev_fdb_entry *fdb_entry = NULL;
-    int bkt;
 
     netdev_dbg(netdev, "%s() DUMP\n", __func__);
 
@@ -745,26 +660,32 @@ static int deipce_switchdev_port_vlan_dump(
     struct deipce_port_priv *pp = np->pp;
     struct deipce_dev_priv *dp = np->dp;
     uint16_t port_vlan = 0;
+    uint16_t pvid = 0;
     uint16_t port_mask = 0;
+    uint16_t port_tag = 0;
     uint16_t vid = 0;
 
     netdev_dbg(netdev, "%s() DUMP\n", __func__);
 
     port_vlan = deipce_read_port_reg(pp, PORT_REG_VLAN);
+    pvid = port_vlan & VLAN_VID_MASK;
 
-    // VLAN ID 4095 is not allowed here?
-    for (vid = 1; vid < VLAN_N_VID; vid++) {
-        port_mask = deipce_read_switch_reg(dp, FRS_VLAN_CFG(vid));
+    for (vid = 1; vid < VLAN_VID_MASK; vid++) {
+        port_mask = deipce_get_vlan_ports(dp, vid);
         if (!(port_mask & (1u << pp->port_num)))
             continue;
+
+        port_tag = deipce_read_switch_reg(dp, FRS_VLAN_TAG(vid));
 
         vlan->vid_begin = vid;
         vlan->vid_end = vid;
         vlan->flags = 0;
 
-        if (vid == (port_vlan & VLAN_VID_MASK))
-            vlan->flags |= BRIDGE_VLAN_INFO_UNTAGGED | BRIDGE_VLAN_INFO_PVID;
+        if (vid == pvid)
+            vlan->flags |= BRIDGE_VLAN_INFO_PVID;
         if (!(port_vlan & PORT_VLAN_TAGGED))
+            vlan->flags |= BRIDGE_VLAN_INFO_UNTAGGED;
+        else if (port_tag & (1u << pp->port_num))
             vlan->flags |= BRIDGE_VLAN_INFO_UNTAGGED;
 
         ret = cb(&vlan->obj);
@@ -841,41 +762,255 @@ int deipce_switchdev_setup_netdev(struct net_device *netdev)
 }
 
 /**
- * Helper function to calculate hash for an FDB entry.
- * @param dmac FES MAC address table entry.
- * @return Hash key for FDB hash table.
+ * Compare two dynamic MAC address table entries for sorting by FID.
+ * @param lhs First entry.
+ * @param rhs Second entry.
+ * @return -1 if lhs is "smaller" than rhs, 1 if the other way around,
+ * and zero if entries are equal.
  */
-static inline uint32_t deipce_switchdev_calc_fdb_hkey(
-        const struct deipce_dmac_entry *dmac)
+static inline int deipce_switchdev_cmp_fdb(
+        const struct deipce_dmac_entry *lhs,
+        const struct deipce_dmac_entry *rhs)
 {
-    return crc32(~0, dmac, sizeof(*dmac));
+    if (lhs->fid < rhs->fid)
+        return -1;
+    if (lhs->fid > rhs->fid)
+        return 1;
+    return memcmp(lhs->mac_address, rhs->mac_address, sizeof(lhs->mac_address));
 }
 
 /**
- * Find static FDB entry from hash table.
- * @param dp FES device privates.
- * @param match MAC address and port number of FDB entry to find.
- * @return Existing FDB entry or NULL.
+ * Insert new dynamic FDB entry to internal FDB.
+ * Entries are stored in FID order.
+ * @param dp Switch privates.
+ * @param new_entry Entry to insert. Must not exist already.
+ */
+static void deipce_switchdev_insert_fdb(
+        struct deipce_dev_priv *dp,
+        struct deipce_switchdev_fdb_entry *new_entry)
+{
+    struct deipce_switchdev *switchdev = &dp->switchdev;
+    struct rb_node **link = &switchdev->fdb.rb_node;
+    struct rb_node *parent = NULL;
+    struct deipce_switchdev_fdb_entry *fdb_entry;
+    int ret;
+
+    while (*link) {
+        parent = *link;
+        fdb_entry = rb_entry(parent, struct deipce_switchdev_fdb_entry, node);
+        ret = deipce_switchdev_cmp_fdb(&fdb_entry->dmac, &new_entry->dmac);
+
+        if (ret > 0)
+            link = &(*link)->rb_left;
+        else
+            link = &(*link)->rb_right;
+    }
+
+    dev_dbg(dp->this_dev, "%s() Add %pM FID %hu\n",
+            __func__, new_entry->dmac.mac_address, new_entry->dmac.fid);
+
+    rb_link_node(&new_entry->node, parent, link);
+    rb_insert_color(&new_entry->node, &switchdev->fdb);
+
+    return;
+}
+
+/**
+ * Find dynamic FDB entry.
+ * @param dp Switch privates.
+ * @param match Dynamic MAC address table entry to look for.
+ * @return Found FDB entry or NULL.
  */
 static struct deipce_switchdev_fdb_entry *deipce_switchdev_find_fdb(
         struct deipce_dev_priv *dp,
         const struct deipce_dmac_entry *match)
 {
-    struct deipce_switchdev_fdb_entry *fdb = NULL;
-    uint32_t hkey = deipce_switchdev_calc_fdb_hkey(match);
+    struct rb_node *node = dp->switchdev.fdb.rb_node;
+    struct deipce_switchdev_fdb_entry *fdb_entry;
+    int ret;
 
-    hash_for_each_possible(dp->switchdev.fdb, fdb, hlist, hkey) {
-        if (memcmp(&fdb->key, match, sizeof(fdb->key)) == 0)
-            return fdb;
+    while (node) {
+        fdb_entry = rb_entry(node, struct deipce_switchdev_fdb_entry, node);
+        ret = deipce_switchdev_cmp_fdb(&fdb_entry->dmac, match);
+
+        if (ret > 0)
+            node = node->rb_left;
+        else if (ret < 0)
+            node = node->rb_right;
+        else
+            return fdb_entry;
     }
 
     return NULL;
 }
 
 /**
+ * Determine VID to use for FDB notifications for a given FID.
+ * A single VID from all VIDs allocated to FID is used to send FDB
+ * notifications for given FID.
+ * @param dp Switch privates.
+ * @param fid FID number.
+ * @param vid Place for VID to be used with FID.
+ */
+static int deipce_switchdev_get_fdb_notify_vid(struct deipce_dev_priv *dp,
+                                               uint16_t fid, uint16_t *vid)
+{
+    unsigned int new_vid;
+    int ret;
+
+    // Use first VID for this FID.
+    ret = deipce_fill_fid_vid_map(dp, &new_vid, fid * dp->features.fids, 1);
+    if (ret)
+        return ret;
+
+    *vid = (uint16_t)new_vid;
+
+    return 0;
+}
+
+/**
+ * Send switchdev FDB notifications taking allocations to FIDs into account.
+ * @param dp Switch privates.
+ * @param pp Port privates.
+ * @param val Notification.
+ * @param fid FID number of FDB entry.
+ */
+static void deipce_switchdev_notify_fdb(
+        struct deipce_dev_priv *dp,
+        struct deipce_port_priv *pp,
+        unsigned long int val,
+        uint16_t fid)
+{
+    struct deipce_switchdev_notify_fdb *notify = &dp->switchdev.notify;
+
+    if (fid == 0) {
+        /*
+         * No support for FIDs, send FDB notification of address
+         * without VLAN information.
+         */
+        notify->fdb.vid = 0;
+        netdev_dbg(pp->netdev, "%s()   VID %hu\n", __func__, notify->fdb.vid);
+        deipce_switchdev_call_notifiers(val, pp->netdev, &notify->fdb.info);
+        return;
+    }
+
+    if (notify->vid[fid] == 0)
+        return;
+
+    notify->fdb.vid = notify->vid[fid];
+    netdev_dbg(pp->netdev, "%s()   VID %hu\n", __func__, notify->fdb.vid);
+    deipce_switchdev_call_notifiers(val, pp->netdev, &notify->fdb.info);
+
+    return;
+}
+
+/**
+ * Adapt FDB notification handling for new VID in FID.
+ * RTNL mutex must be held when calling this.
+ * @param dp Switch privates.
+ * @param vid VID number that was allocated to FID.
+ * @param fid FID number VID was allocated to.
+ */
+void deipce_switchdev_add_vlan_fid(struct deipce_dev_priv *dp,
+                                   uint16_t vid, uint16_t fid)
+{
+    struct deipce_switchdev_notify_fdb *notify = &dp->switchdev.notify;
+
+    if (notify->vid[fid] == 0) {
+        deipce_switchdev_get_fdb_notify_vid(dp, fid, &notify->vid[fid]);
+
+        dev_dbg(dp->this_dev,
+                "%s() Use VID %hu for FID %hu FDB notifications\n",
+                __func__, notify->vid[fid], fid);
+    }
+
+    return;
+}
+
+/**
+ * Adapt FDB notification handling when VID is removed from FID.
+ * RTNL mutex must be held when calling this.
+ * @param dp Switch privates.
+ * @param vid VID number that was removed from FID.
+ * @param fid FID number VID was allocated to.
+ */
+void deipce_switchdev_del_vlan_fid(struct deipce_dev_priv *dp,
+                                   uint16_t vid, uint16_t fid)
+{
+    struct deipce_switchdev_notify_fdb *notify = &dp->switchdev.notify;
+    struct rb_node *node = rb_first(&dp->switchdev.fdb);
+    struct deipce_switchdev_fdb_entry *fdb_entry;
+    struct deipce_port_priv *pp;
+    struct deipce_netdev_priv *np;
+    uint16_t new_vid;
+    int ret;
+
+    // Nothing to do if VID is not the one used for notifications.
+    if (vid != notify->vid[fid])
+        return;
+
+    // Determine new VID for notifications.
+    ret = deipce_switchdev_get_fdb_notify_vid(dp, fid, &new_vid);
+    if (ret)
+        return;
+
+    // Move all notified FDB entries in FID from old VID to new VID.
+    while (node) {
+        fdb_entry = rb_entry(node, struct deipce_switchdev_fdb_entry, node);
+        node = rb_next(node);
+
+        dev_dbg(dp->this_dev, "%s() cmp %pM FID %hu against FID %hu\n",
+                __func__, fdb_entry->dmac.mac_address, fdb_entry->dmac.fid,
+                fid);
+
+        if (fdb_entry->dmac.fid < fid)
+            continue;
+
+        if (fdb_entry->dmac.fid > fid)
+            break;
+
+        pp = dp->port[fdb_entry->dmac.port_num];
+
+        // No notifications for nonexistent ports.
+        if (!pp || !pp->netdev)
+            continue;
+
+        np = netdev_priv(pp->netdev);
+        if (!(np->switchdev.brport_flags & BR_LEARNING_SYNC))
+            continue;
+
+        notify->fdb.addr = fdb_entry->dmac.mac_address;
+        notify->fdb.vid = notify->vid[fid];
+        dev_dbg(dp->this_dev, "%s()   FDB DEL %pM VID %hu %s\n",
+                __func__, notify->fdb.addr, notify->fdb.vid,
+                netdev_name(pp->netdev));
+        deipce_switchdev_call_notifiers(SWITCHDEV_FDB_DEL, pp->netdev,
+                                        &notify->fdb.info);
+
+        if (new_vid) {
+            notify->fdb.vid = new_vid;
+            dev_dbg(dp->this_dev, "%s()   FDB ADD %pM VID %hu %s\n",
+                    __func__, notify->fdb.addr, notify->fdb.vid,
+                    netdev_name(pp->netdev));
+            deipce_switchdev_call_notifiers(SWITCHDEV_FDB_ADD, pp->netdev,
+                                            &notify->fdb.info);
+        }
+    }
+
+    // Use new VID in the future.
+    notify->vid[fid] = new_vid;
+
+    dev_dbg(dp->this_dev,
+            "%s() Use VID %hu for FID %hu FDB notifications\n",
+            __func__, notify->vid[fid], fid);
+
+    return;
+}
+
+/**
  * Check FES MAC address table entry.
- * Notifies upper layers when new entry is learned,
- * and marks existing entries as still valid.
+ * Adds new entries to red-black tree if not already there,
+ * and marks already existing entries as being still valid.
  * @param dp FES device privates.
  * @param dmac FES dynamic MAC address table entry.
  * @param arg Notifier FDB info to use.
@@ -884,7 +1019,7 @@ static void deipce_switchdev_check_fdb_entry(struct deipce_dev_priv *dp,
                                              struct deipce_dmac_entry *dmac,
                                              void *arg)
 {
-    struct switchdev_notifier_fdb_info *info = arg;
+    struct deipce_switchdev_notify_fdb *notify = arg;
     struct deipce_port_priv *pp = NULL;
     struct deipce_netdev_priv *np = NULL;
     struct deipce_switchdev_fdb_entry *fdb = NULL;
@@ -913,24 +1048,18 @@ static void deipce_switchdev_check_fdb_entry(struct deipce_dev_priv *dp,
     if (!(pp->flags & DEIPCE_HAS_MASTER))
         return;
 
-    // Do not learn MAC addresses from CPU port, crashes Linux 4.4.
-    if (pp->flags & DEIPCE_PORT_CPU)
-        return;
-
     np = netdev_priv(pp->netdev);
     if (!(np->switchdev.brport_flags & BR_LEARNING))
         return;
 
-    info->addr = dmac->mac_address;
-    info->vid = 0;
-
     fdb = deipce_switchdev_find_fdb(dp, dmac);
 
-    netdev_dbg(pp->netdev, "%s() FDB %s %pM VID %hu\n",
-               __func__, fdb ? "REFRESH" : "ADD", info->addr, info->vid);
+    netdev_dbg(pp->netdev, "%s() FDB %s %pM FID %hu\n",
+               __func__, fdb ? "REFRESH" : "ADD",
+               notify->fdb.addr, dmac->fid);
 
     if (fdb) {
-        fdb->last_seen = dp->switchdev.fdb_counter;
+        fdb->last_seen = notify->scan_count;
     }
     else {
         fdb = kmalloc(sizeof(*fdb), GFP_KERNEL);
@@ -940,19 +1069,12 @@ static void deipce_switchdev_check_fdb_entry(struct deipce_dev_priv *dp,
         }
 
         *fdb = (struct deipce_switchdev_fdb_entry){
-            .hkey = deipce_switchdev_calc_fdb_hkey(dmac),
-            .last_seen = dp->switchdev.fdb_counter,
-            .key = *dmac,
+            .last_seen = notify->scan_count,
+            .dmac = *dmac,
         };
 
-        hash_add(dp->switchdev.fdb, &fdb->hlist, fdb->hkey);
+        deipce_switchdev_insert_fdb(dp, fdb);
     }
-
-    if (!(np->switchdev.brport_flags & BR_LEARNING_SYNC))
-        return;
-
-    deipce_switchdev_call_notifiers(SWITCHDEV_FDB_ADD, pp->netdev,
-                                    &info->info);
 
     return;
 }
@@ -964,57 +1086,92 @@ static void deipce_switchdev_check_fdb_entry(struct deipce_dev_priv *dp,
 static void deipce_switchdev_notify_fdb_work(struct work_struct *work)
 {
     int ret = -EIO;
+    struct deipce_switchdev_notify_fdb *notify =
+        container_of(work, struct deipce_switchdev_notify_fdb, fdb_work.work);
     struct deipce_dev_priv *dp =
-        container_of(work, struct deipce_dev_priv, switchdev.notify_fdb.work);
+        container_of(notify, struct deipce_dev_priv, switchdev.notify);
     struct deipce_drv_priv *drv = deipce_get_drv_priv();
     struct deipce_port_priv *pp = NULL;
     struct deipce_netdev_priv *np = NULL;
-    struct switchdev_notifier_fdb_info info = {
-        .vid = 0,
-    };
     struct deipce_switchdev_fdb_entry *fdb_entry = NULL;
-    struct hlist_node *tmp = NULL;
-    int bkt;
+    struct deipce_switchdev_fdb_entry *prev_fdb_entry = NULL;
+    struct rb_node *node;
 
     // Locking order: 1. RTNL 2. FES.
     rtnl_lock();
 
-    dp->switchdev.fdb_counter++;
+    notify->scan_count++;
 
-    ret = deipce_get_mac_table(dp, &deipce_switchdev_check_fdb_entry, &info);
+    /*
+     * Add new and update existing entries, send notifications later
+     * in FID order, for performance reasons.
+     */
+    ret = deipce_get_mac_table(dp, &deipce_switchdev_check_fdb_entry, notify);
     if (ret < 0) {
         dev_dbg(dp->this_dev, "%s() Failed to read MAC address table\n",
                 __func__);
     }
 
-    // Inform upper layers of aged entries and drop them.
-    hash_for_each_safe(dp->switchdev.fdb, bkt, tmp, fdb_entry, hlist) {
-        if (fdb_entry->last_seen == dp->switchdev.fdb_counter)
-            continue;
+    // Inform upper layers of new and aged entries and drop aged entries.
+    node = rb_first(&dp->switchdev.fdb);
+    while (node) {
+        fdb_entry = rb_entry(node, struct deipce_switchdev_fdb_entry, node);
+        node = rb_next(node);
 
-        // This entry has been aged by FES.
-        pp = dp->port[fdb_entry->key.port_num];
+        pp = dp->port[fdb_entry->dmac.port_num];
+
+        dev_dbg(dp->this_dev, "%s() FDB check %pM FID %hu %s\n",
+                __func__, fdb_entry->dmac.mac_address, fdb_entry->dmac.fid,
+                pp ? netdev_name(pp->netdev) : "");
 
         // No notifications for nonexistent ports.
         if (pp && pp->netdev) {
             np = netdev_priv(pp->netdev);
+
+            if (fdb_entry->last_seen == notify->scan_count) {
+                // Entry has not been aged (new or needs refreshing).
+                if (np->switchdev.brport_flags & BR_LEARNING_SYNC) {
+                    notify->fdb.addr = fdb_entry->dmac.mac_address;
+                    netdev_dbg(pp->netdev,
+                               "%s()   FDB ADD/REFRESH %pM FID %hu\n",
+                               __func__, notify->fdb.addr, fdb_entry->dmac.fid);
+                    deipce_switchdev_notify_fdb(dp, pp, SWITCHDEV_FDB_ADD,
+                                                fdb_entry->dmac.fid);
+                }
+
+                prev_fdb_entry = fdb_entry;
+                continue;
+            }
+
+            // This entry has been aged by FES.
             if (np->switchdev.brport_flags & BR_LEARNING_SYNC) {
-                info.addr = fdb_entry->key.mac_address;
-                netdev_dbg(pp->netdev, "%s() FDB DEL %pM VID %hu\n",
-                           __func__, info.addr, info.vid);
-                deipce_switchdev_call_notifiers(SWITCHDEV_FDB_DEL,
-                                                pp->netdev,
-                                                &info.info);
+                notify->fdb.addr = fdb_entry->dmac.mac_address;
+                netdev_dbg(pp->netdev, "%s()   FDB DEL %pM FID %hu\n",
+                           __func__, notify->fdb.addr, fdb_entry->dmac.fid);
+                deipce_switchdev_notify_fdb(dp, pp, SWITCHDEV_FDB_DEL,
+                                            fdb_entry->dmac.fid);
             }
         }
 
-        hash_del(&fdb_entry->hlist);
+        dev_dbg(dp->this_dev, "%s()   FDB remove %pM FID %hu\n",
+                __func__, fdb_entry->dmac.mac_address, fdb_entry->dmac.fid);
+
+        rb_erase(&fdb_entry->node, &dp->switchdev.fdb);
         kfree(fdb_entry);
+
+        // Tree may have been rebalanced, must find next from the beginning.
+        if (prev_fdb_entry) {
+            fdb_entry = deipce_switchdev_find_fdb(dp, &prev_fdb_entry->dmac);
+            node = rb_next(&fdb_entry->node);
+        }
+        else {
+            node = rb_first(&dp->switchdev.fdb);
+        }
     }
 
     rtnl_unlock();
 
-    queue_delayed_work(drv->wq_low, &dp->switchdev.notify_fdb,
+    queue_delayed_work(drv->wq_low, &dp->switchdev.notify.fdb_work,
                        DEIPCE_SWITCHDEV_NOTIFY_FDB_INTERVAL);
 
     return;
@@ -1036,7 +1193,7 @@ int deipce_switchdev_enable(struct net_device *netdev)
     if (dp->switchdev.enabled_port_count++ == 0) {
         dev_dbg(dp->this_dev, "%s() Start polling MAC address table\n",
                 __func__);
-        queue_delayed_work(drv->wq_low, &dp->switchdev.notify_fdb,
+        queue_delayed_work(drv->wq_low, &dp->switchdev.notify.fdb_work,
                            DEIPCE_SWITCHDEV_NOTIFY_FDB_INTERVAL);
     }
 
@@ -1060,7 +1217,7 @@ void deipce_switchdev_disable(struct net_device *netdev)
     if (--dp->switchdev.enabled_port_count == 0) {
         dev_dbg(dp->this_dev, "%s() Stop polling MAC address table\n",
                 __func__);
-        cancel_delayed_work_sync(&dp->switchdev.notify_fdb);
+        cancel_delayed_work_sync(&dp->switchdev.notify.fdb_work);
     }
 
     return;
@@ -1079,6 +1236,12 @@ static int deipce_switchdev_join_bridge(struct net_device *netdev,
 {
     struct deipce_netdev_priv *np = netdev_priv(netdev);
     struct deipce_port_priv *pp = np->pp;
+    struct deipce_dev_priv *dp = np->dp;
+    int ret = 0;
+
+    // Refuse to join ports of the same switch to different bridges.
+    if (dp->switchdev.master && dp->switchdev.master != master)
+        return -EINVAL;
 
     // Log this.
     netdev_info(netdev, "Joining %s, resetting port config\n",
@@ -1091,13 +1254,26 @@ static int deipce_switchdev_join_bridge(struct net_device *netdev,
     switchdev_port_fwd_mark_set(netdev, master, true);
 #endif
 
-    // Do not allow learning and flooding unicast on internal ports.
-    if (pp->flags & DEIPCE_PORT_CPU)
-        np->switchdev.brport_flags = 0;
-    else
-        np->switchdev.brport_flags = DEIPCE_DEFAULT_BR_FLAGS;
+    np->switchdev.brport_flags = DEIPCE_DEFAULT_BR_FLAGS;
+
+    if (dp->switchdev.join_count++ == 0) {
+        dp->switchdev.master = master;
+        ret = deipce_bridge_sysfs_init(dp);
+        if (ret)
+            goto err_sysfs;
+    }
 
     return 0;
+
+err_sysfs:
+    dp->switchdev.master = NULL;
+    dp->switchdev.join_count--;
+
+#if LINUX_VERSION_CODE < KERNEL_VERSION(4,9,0)
+    switchdev_port_fwd_mark_set(netdev, master, false);
+#endif
+
+    return ret;
 }
 
 /**
@@ -1114,11 +1290,17 @@ static int deipce_switchdev_leave_bridge(struct net_device *netdev,
 {
     struct deipce_netdev_priv *np = netdev_priv(netdev);
     struct deipce_port_priv *pp = np->pp;
+    struct deipce_dev_priv *dp = np->dp;
     int ret = 0;
 
     // Log this.
     netdev_info(netdev, "Leaving %s, restoring default port config\n",
                 netdev_name(master));
+
+    if (--dp->switchdev.join_count == 0) {
+        deipce_bridge_sysfs_cleanup(dp);
+        dp->switchdev.master = NULL;
+    }
 
     // Reset port VLAN configuration to driver init time defaults.
     deipce_reset_port_vlan_config(pp, true);
@@ -1160,7 +1342,7 @@ static int deipce_switchdev_netdev_event(struct notifier_block *nb,
     case NETDEV_CHANGEUPPER:
         info = arg;
         if (!info->master)
-            goto out;
+            break;
         np = netdev_priv(netdev);
         pp = np->pp;
         if (info->linking) {
@@ -1171,15 +1353,19 @@ static int deipce_switchdev_netdev_event(struct notifier_block *nb,
             pp->flags &= ~DEIPCE_HAS_MASTER;
             ret = deipce_switchdev_leave_bridge(netdev, info->upper_dev);
         }
-        if (ret)
+        if (ret) {
             netdev_warn(netdev,
                         "Failed to reflect master change (error %i)\n",
                         ret);
+            ret = NOTIFY_BAD;
+        }
+        else {
+            ret = NOTIFY_OK;
+        }
         break;
     }
 
-out:
-    return NOTIFY_DONE;
+    return ret;
 }
 
 /**
@@ -1188,12 +1374,19 @@ out:
  */
 int deipce_switchdev_init_switch(struct deipce_dev_priv *dp)
 {
+    struct deipce_switchdev_notify_fdb *notify = &dp->switchdev.notify;
     struct netdev_phys_item_id phys_id = { .id_len = 0 };
     uint16_t data;
 
-    hash_init(dp->switchdev.fdb);
-    INIT_DELAYED_WORK(&dp->switchdev.notify_fdb,
-                      &deipce_switchdev_notify_fdb_work);
+    dp->switchdev.fdb = RB_ROOT;
+    INIT_DELAYED_WORK(&notify->fdb_work, &deipce_switchdev_notify_fdb_work);
+
+    if (dp->features.fids > 0) {
+        notify->vid = kzalloc((dp->features.fids + 1) * sizeof(*notify->vid),
+                              GFP_KERNEL);
+        if (!notify->vid)
+            return -ENOMEM;
+    }
 
     // Print switch ID in sysfs phys_switch_id format.
     deipce_switchdev_id(dp, &phys_id);
@@ -1228,18 +1421,22 @@ int deipce_switchdev_init_port(struct deipce_dev_priv *dp,
  */
 void deipce_switchdev_cleanup_switch(struct deipce_dev_priv *dp)
 {
-    struct deipce_switchdev_fdb_entry *fdb_entry = NULL;
-    struct hlist_node *tmp = NULL;
-    int bkt;
+    struct deipce_switchdev_fdb_entry *fdb_entry;
+    struct deipce_switchdev_fdb_entry *tmp;
 
     dev_dbg(dp->this_dev, "%s()\n", __func__);
 
     dev_dbg(dp->this_dev, "%s() Stop polling MAC address table\n", __func__);
-    cancel_delayed_work_sync(&dp->switchdev.notify_fdb);
+    cancel_delayed_work_sync(&dp->switchdev.notify.fdb_work);
 
-    hash_for_each_safe(dp->switchdev.fdb, bkt, tmp, fdb_entry, hlist) {
-        hash_del(&fdb_entry->hlist);
+    rbtree_postorder_for_each_entry_safe(fdb_entry, tmp,
+                                         &dp->switchdev.fdb, node) {
         kfree(fdb_entry);
+    }
+
+    if (dp->switchdev.notify.vid) {
+        kfree(dp->switchdev.notify.vid);
+        dp->switchdev.notify.vid = NULL;
     }
 
     return;

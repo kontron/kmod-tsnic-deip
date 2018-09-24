@@ -5,7 +5,7 @@
 
    DE-IP Core Edge Linux driver
 
-   Copyright (C) 2017 Flexibilis Oy
+   Copyright (C) 2018 Flexibilis Oy
 
    This program is free software; you can redistribute it and/or modify it
    under the terms of the GNU General Public License version 2
@@ -21,15 +21,22 @@
 
 */
 
-#ifndef DEIPCE_EDGEX_SYSFS_H
-#define DEIPCE_EDGEX_SYSFS_H
+#ifndef DEIPCE_QBRIDGE_SYSFS_H
+#define DEIPCE_QBRIDGE_SYSFS_H
 
-#include "deipce_types.h"
+#ifdef CONFIG_SYSFS
 
-int deipce_edgex_sysfs_init_port(struct deipce_port_priv *pp);
-void deipce_edgex_sysfs_cleanup_port(struct deipce_port_priv *pp);
+int deipce_qbridge_sysfs_init(struct deipce_dev_priv *dp);
+void deipce_qbridge_sysfs_cleanup(struct deipce_dev_priv *dp);
 
-int deipce_edgex_sysfs_init_switch(struct deipce_dev_priv *dp);
-void deipce_edgex_sysfs_cleanup_switch(struct deipce_dev_priv *dp);
+#else
+
+static inline int deipce_qbridge_sysfs_init(struct deipce_dev_priv *dp)
+{ return 0; }
+
+static inline void deipce_qbridge_sysfs_cleanup(struct deipce_dev_priv *dp)
+{ return; }
+
+#endif // CONFIG_SYSFS
 
 #endif

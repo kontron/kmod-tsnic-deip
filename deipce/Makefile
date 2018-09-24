@@ -22,13 +22,17 @@ deipce-y := deipce_main.o \
 	deipce_clock_main.o deipce_clock_nco.o \
 	deipce_fpts_main.o \
 	deipce_fsc_main.o deipce_fsc_hw.o deipce_ibc_main.o \
-	deipce_shaper.o deipce_time.o
+	deipce_shaper.o deipce_time.o deipce_mstp.o
 
 deipce-$(CONFIG_NET_SWITCHDEV) += deipce_switchdev.o
 deipce-$(CONFIG_PTP_1588_CLOCK) += deipce_clock_ptp.o
-deipce-$(CONFIG_DEBUG_FS) += deipce_debugfs.o
 deipce-$(CONFIG_SYSFS) += deipce_fsc_sysfs.o deipce_fqtss_sysfs.o \
-	deipce_port_sysfs.o deipce_edgex_sysfs.o
+	deipce_port_sysfs.o deipce_edgex_sysfs.o deipce_phys_sysfs.o \
+	deipce_preempt_sysfs.o
+ifdef CONFIG_NET_SWITCHDEV
+deipce-$(CONFIG_SYSFS) += deipce_qbridge_sysfs.o \
+	deipce_bridge_sysfs.o deipce_mstp_sysfs.o
+endif
 
 else
 
