@@ -30,13 +30,14 @@
 #include <linux/spinlock.h>
 #include <linux/workqueue.h>
 #include <linux/net_tstamp.h>
-#include <linux/debugfs.h>
 #include <linux/ethtool.h>
+#include <linux/if_vlan.h>
 
 #include "deipce_if.h"
 #include "deipce_hw_type.h"
 #include "deipce_switchdev.h"
 #include "deipce_preempt.h"
+#include "deipce_mstp.h"
 
 #define DEIPCE_MAX_DEVICES              8       ///< limit for switch devices
 #define DEIPCE_MAX_PORTS                16      ///< limit for number of ports
@@ -46,6 +47,7 @@
 #define DEIPCE_MAX_POLICERS             4096    ///< limit for policers
 #define DEIPCE_MIN_SMAC_ROWS            128     ///< limit for SMAC rows
 #define DEIPCE_MAX_SMAC_ROWS            4096    ///< limit for SMAC rows
+#define DEIPCE_MAX_FIDS                 64      ///< limit for FIDs
 
 // Port flags
 #define DEIPCE_PORT_CPU                 BIT(0)  ///< CPU port
@@ -56,6 +58,7 @@
 #define DEIPCE_HAS_SFP_PHY              BIT(5)  ///< SFP PHY configured
 #define DEIPCE_HAS_SEPARATE_SFP         BIT(6)  ///< Separate SFP port
 #define DEIPCE_HAS_MASTER               BIT(7)  ///< Attached to master
+#define DEIPCE_ADAPTER_DELAY_OVERRIDE   BIT(8)  ///< Adapter delays overridden
 
 /// Modes supported by FES
 #define DEIPCE_ETHTOOL_SUPPORTED \
@@ -85,24 +88,27 @@ enum deipce_medium_type {
 };
 
 /**
- * Link modes.
- */
-enum link_mode {
-    LM_DOWN,
-    LM_10FULL,
-    LM_100FULL,
-    LM_1000FULL,
-};
-
-/// Number of link modes
-#define DEIPCE_LINK_MODE_COUNT (LM_1000FULL + 1)
-
-/**
  * Traffic delays for both directions.
  */
 struct deipce_delay {
     unsigned long int tx;       ///< TX delay in ns
     unsigned long int rx;       ///< RX delay in ns
+};
+
+/**
+ * Traffic delay components.
+ */
+enum deipce_delay_type {
+    DEIPCE_DELAY_PHY,           ///< PHY delay
+    DEIPCE_DELAY_ADAPTER,       ///< adapter delay
+};
+
+/**
+ * Type for specifying direction.
+ */
+enum deipce_dir {
+    DEIPCE_DIR_TX,              ///< transmit
+    DEIPCE_DIR_RX,              ///< receive
 };
 
 /**
@@ -263,6 +269,8 @@ struct deipce_port_adapter {
                                         ///< set also when adapter is not
                                         ///< recognized
     uint8_t port;                       ///< current ETHTOOL port
+    /// adapter delays for each link mode
+    struct deipce_delay delay[DEIPCE_LINK_MODE_COUNT];
     struct deipce_port_adapter_ops ops; ///< port adapter operations
 };
 
@@ -303,7 +311,6 @@ struct deipce_port_priv {
     struct mutex port_reg_lock;         ///< synchronize port register access
 
     int mirror_port;                    ///< mirror port or -1 to disable
-    uint16_t mgmt_tc;                   ///< management traffic class
     struct deipce_delay cur_delay;      ///< current total delays
     struct deipce_tx_stamper tx_stamper;       ///< PTP TX frame timestamper
     unsigned int rx_stamper;            ///< PTP RX frame timestamper index
@@ -317,10 +324,7 @@ struct deipce_port_priv {
         spinlock_t lock;                ///< synchronize access
         uint64_t bitrate[DEIPCE_MAX_PRIO_QUEUES];       ///< rate in bps
     } shaper;
-
-#if IS_ENABLED(CONFIG_DEBUG_FS)
-    struct dentry *debugfs_dir;         ///< debugfs port directory
-#endif
+    struct deipce_port_mstp mstp;       ///< port MSTP support
 };
 
 /**
@@ -387,6 +391,7 @@ struct deipce_features {
                                 ///< zero means port 0 only
     uint16_t ct_ports;          ///< bitmask of ports with cut-through support
     uint16_t preempt_ports;     ///< bitmask of ports with preemption support
+    uint16_t fids;              ///< number of FIDs
 };
 
 /**
@@ -412,6 +417,7 @@ struct deipce_dev_priv {
     void __iomem *ioaddr;               ///< switch registers
 
     uint16_t cpu_port_mask;             ///< port mask of CPU port, 1 bit only
+    uint16_t mgmt_tc;                   ///< management traffic class
     struct hwtstamp_config tstamp_cfg;  ///< hardware timestamper config,
                                         ///< synchronized via common_reg_lock
     /// PTP (port 0) RX frame timestamper
@@ -425,6 +431,13 @@ struct deipce_dev_priv {
     struct deipce_port_priv *port[DEIPCE_MAX_PORTS];
 
     struct deipce_switchdev switchdev;  ///< switchdev support
+    struct {
+        unsigned int count;             ///< number of VLANs in use
+        /// bitmap of new to-be-added VIDs
+        unsigned long int new_vids[BITS_TO_LONGS(VLAN_N_VID)];
+        uint16_t *fid_vlan_count;       ///< number of VLANs in each FID
+        struct deipce_mstp mstp;        ///< MSTP support
+    } vlan;                             ///< VLAN configuration information
     struct deipce_stats stats;          ///< IP statistics
     struct mutex common_reg_lock;       ///< synchronize switch register access
     struct mutex smac_table_lock;       ///< synchronize SMAC table access
@@ -440,10 +453,6 @@ struct deipce_dev_priv {
     struct deipce_features features;    ///< switch features
 
     struct deipce_time *time;           ///< time interface
-
-#if IS_ENABLED(CONFIG_DEBUG_FS)
-    struct dentry *debugfs_dir;         ///< debugfs port directory
-#endif
 };
 
 /**
@@ -458,10 +467,6 @@ struct deipce_drv_priv {
     struct deipce_dev_priv *dev_priv[DEIPCE_MAX_DEVICES];
 
     uint64_t *crc40_table;              ///< small CRC40 table (4-bit index)
-
-#if IS_ENABLED(CONFIG_DEBUG_FS)
-    struct dentry *debugfs_dir;         ///< debugfs driver directory
-#endif
 };
 
 /**
@@ -541,6 +546,21 @@ static inline uint32_t deipce_read_switch_uint32(struct deipce_dev_priv *dp,
                                                  unsigned int regnum)
 {
     return ioread32(deipce_reg_addr(dp->ioaddr, regnum));
+}
+
+/**
+ * Read switch generic register value.
+ * @param dp Switch privates.
+ * @param reg Generic register to read.
+ * @param mask Bitmask for value.
+ * @return Masked generic value.
+ */
+static inline uint16_t deipce_read_generic(struct deipce_dev_priv *dp,
+                                           unsigned int reg,
+                                           uint16_t mask)
+{
+    // Generics addresses are already byte addresses.
+    return deipce_read_switch_reg(dp, reg >> 1) & mask;
 }
 
 #endif

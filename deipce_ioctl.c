@@ -41,8 +41,8 @@
  * @param pp Port privates.
  * @param rq Request
  */
-int deipce_handle_set_hwtstamp_ioctl(struct deipce_dev_priv *dp,
-                                     struct ifreq *rq)
+static int deipce_handle_set_hwtstamp_ioctl(struct deipce_dev_priv *dp,
+                                            struct ifreq *rq)
 {
     struct hwtstamp_config config = { .flags = 0 };
     unsigned long int not_copied;
@@ -131,8 +131,8 @@ int deipce_handle_set_hwtstamp_ioctl(struct deipce_dev_priv *dp,
  * @param pp Port privates.
  * @param rq Request
  */
-int deipce_handle_get_hwtstamp_ioctl(struct deipce_dev_priv *dp,
-                                     struct ifreq *rq)
+static int deipce_handle_get_hwtstamp_ioctl(struct deipce_dev_priv *dp,
+                                            struct ifreq *rq)
 {
     unsigned long int not_copied;
 

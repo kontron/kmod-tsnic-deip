@@ -26,7 +26,7 @@
 
 struct deipce_port_priv;
 
-#ifdef CONFIG_SYSFS
+#if IS_ENABLED(CONFIG_SYSFS)
 
 int deipce_fqtss_sysfs_init(struct deipce_port_priv *pp);
 void deipce_fqtss_sysfs_cleanup(struct deipce_port_priv *pp);

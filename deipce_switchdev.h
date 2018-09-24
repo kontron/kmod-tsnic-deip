@@ -29,7 +29,7 @@
 
 #if IS_ENABLED(CONFIG_NET_SWITCHDEV)
 
-#include <linux/hashtable.h>
+#include <linux/rbtree.h>
 #include <net/switchdev.h>
 
 #include "deipce_hw_type.h"
@@ -41,10 +41,20 @@ struct deipce_port_priv;
  * Learned FDB entry for FES MAC table addresses.
  */
 struct deipce_switchdev_fdb_entry {
-    struct hlist_node hlist;            ///< hash list
-    uint32_t hkey;                      ///< hash key
+    struct rb_node node;                ///< stored in a red-black tree
     unsigned int last_seen;             ///< last seen counter value
-    struct deipce_dmac_entry key;       ///< dynamic MAC address table entry
+    struct deipce_dmac_entry dmac;      ///< dynamic MAC address table entry
+};
+
+/**
+ * FDB notification information.
+ */
+struct deipce_switchdev_notify_fdb {
+    struct delayed_work fdb_work;       ///< notify work for FDB changes
+    unsigned int scan_count;            ///< current FDB scan number
+    struct switchdev_notifier_fdb_info fdb;    ///< FDB notification
+    uint16_t *vid;                      ///< VID to use in FDB notifications,
+                                        ///< one for each FID
 };
 
 /**
@@ -53,10 +63,11 @@ struct deipce_switchdev_fdb_entry {
 struct deipce_switchdev {
     clock_t ageing_time;                ///< current ageing time
     unsigned int enabled_port_count;    ///< number of enabled port netdevices
-    unsigned int fdb_counter;           ///< current FDB check counter
-    DECLARE_HASHTABLE(fdb, 16);         ///< learned FDB entries,
+    struct rb_root fdb;                 ///< learned FDB entries,
                                         ///< synchronized via RTNL lock
-    struct delayed_work notify_fdb;     ///< notify FDB changes
+    struct deipce_switchdev_notify_fdb notify;  ///< FDB notification info
+    unsigned int join_count;            ///< number of ports joined to master
+    struct net_device *master;          ///< master (Linux bridge) device
 };
 
 /**
@@ -74,6 +85,10 @@ int deipce_switchdev_init_port(struct deipce_dev_priv *dp,
 int deipce_switchdev_setup_netdev(struct net_device *netdev);
 int deipce_switchdev_enable(struct net_device *netdev);
 void deipce_switchdev_disable(struct net_device *netdev);
+void deipce_switchdev_add_vlan_fid(struct deipce_dev_priv *dp,
+                                   uint16_t vid, uint16_t fid);
+void deipce_switchdev_del_vlan_fid(struct deipce_dev_priv *dp,
+                                   uint16_t vid, uint16_t fid);
 
 int deipce_switchdev_get_phys_port_name(struct net_device *netdev,
                                         char *name, size_t len);
@@ -115,6 +130,14 @@ static inline int deipce_switchdev_enable(struct net_device *netdev)
 { return 0; }
 
 static inline void deipce_switchdev_disable(struct net_device *netdev)
+{ }
+
+static inline void deipce_switchdev_add_vlan_fid(struct deipce_dev_priv *dp,
+                                                 uint16_t vid, uint16_t fid)
+{ }
+
+static inline void deipce_switchdev_del_vlan_fid(struct deipce_dev_priv *dp,
+                                                 uint16_t vid, uint16_t fid)
 { }
 
 static inline void deipce_switchdev_cleanup_switch(

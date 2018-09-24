@@ -30,6 +30,8 @@
 #include "deipce_hw.h"
 #include "deipce_sysfs_common.h"
 #include "deipce_edgex_sysfs.h"
+#include "deipce_phys_sysfs.h"
+#include "deipce_mstp_sysfs.h"
 #include "deipce_port_sysfs.h"
 
 /// ieee8021Bridge/portNumTrafficClasses
@@ -103,34 +105,6 @@ static DEIPCE_ATTR_RW(portDefaultUserPriority,
                    &deipce_port_sysfs_port_default_user_prio_show,
                    &deipce_port_sysfs_port_default_user_prio_store);
 
-// ieee8021Mstp/flushTree
-
-static ssize_t deipce_port_sysfs_mstp_flush_tree_store(
-        struct device *dev, struct device_attribute *attr,
-        const char *buf, size_t count)
-{
-    struct deipce_port_priv *pp = to_deipce_port_priv(dev);
-    struct deipce_dev_priv *dp = pp->dp;
-    unsigned int mstid;
-    int ret = kstrtouint(buf, 0, &mstid);
-
-    netdev_dbg(to_net_dev(dev), "%s() buf %s count %zu\n",
-               __func__, buf, count);
-
-    if (ret)
-        return ret;
-
-    // MSTID is ignored (RSTP support only).
-    ret = deipce_clear_mac_table(dp, 1u << pp->port_num);
-    if (ret)
-        return ret;
-
-    return count;
-}
-
-static DEIPCE_ATTR_WO(flushTree,
-                   &deipce_port_sysfs_mstp_flush_tree_store);
-
 /// Attribute groups
 static const struct attribute_group *deipce_port_sysfs_attr_groups[] = {
     &(struct attribute_group){
@@ -138,13 +112,6 @@ static const struct attribute_group *deipce_port_sysfs_attr_groups[] = {
         .attrs = (struct attribute*[]){
             &dev_attr_portNumTrafficClasses.attr,
             &dev_attr_portDefaultUserPriority.attr,
-            NULL,
-        },
-    },
-    &(struct attribute_group){
-        .name = "ieee8021Mstp",
-        .attrs = (struct attribute*[]){
-            &dev_attr_flushTree.attr,
             NULL,
         },
     },
@@ -164,11 +131,25 @@ int deipce_port_sysfs_init(struct deipce_port_priv *pp)
     if (ret)
         return ret;
 
-    ret = deipce_edgex_sysfs_init(pp);
+    ret = deipce_edgex_sysfs_init_port(pp);
     if (ret)
         goto err_edgex;
 
+    ret = deipce_phys_sysfs_init(pp);
+    if (ret)
+        goto err_phys;
+
+    ret = deipce_mstp_sysfs_init_port(pp);
+    if (ret)
+        goto err_mstp;
+
     return ret;
+
+err_mstp:
+    deipce_phys_sysfs_cleanup(pp);
+
+err_phys:
+    deipce_edgex_sysfs_cleanup_port(pp);
 
 err_edgex:
     sysfs_remove_groups(&pp->netdev->dev.kobj, deipce_port_sysfs_attr_groups);
@@ -182,7 +163,9 @@ err_edgex:
  */
 void deipce_port_sysfs_cleanup(struct deipce_port_priv *pp)
 {
-    deipce_edgex_sysfs_cleanup(pp);
+    deipce_mstp_sysfs_cleanup_port(pp);
+    deipce_phys_sysfs_cleanup(pp);
+    deipce_edgex_sysfs_cleanup_port(pp);
     sysfs_remove_groups(&pp->netdev->dev.kobj, deipce_port_sysfs_attr_groups);
 
     return;

@@ -104,25 +104,14 @@ static int deipce_set_port_mode(struct net_device *netdev,
     struct deipce_netdev_priv *np = netdev_priv(netdev);
     struct deipce_port_priv *pp = np->pp;
     struct deipce_dev_priv *dp = np->dp;
-    struct deipce_delay adapter_delay;
     int ret;
 
     ret = deipce_set_port_state(netdev, link_mode);
 
-    // Update link delays.
-    deipce_get_adapter_delays(pp, &adapter_delay);
-    pp->cur_delay.tx = adapter_delay.tx + pp->ext_phy.delay[link_mode].tx;
-    pp->cur_delay.rx = adapter_delay.rx + pp->ext_phy.delay[link_mode].rx;
-
-    netdev_dbg(netdev, "%s() TX/RX delays adapter %lu/%lu PHY %lu/%lu"
-               " total %lu/%lu ns\n",
-               __func__, adapter_delay.tx, adapter_delay.rx,
-               pp->ext_phy.delay[link_mode].tx,
-               pp->ext_phy.delay[link_mode].rx,
-               pp->cur_delay.tx, pp->cur_delay.rx);
+    deipce_update_delays(pp);
 
     if (dp->features.preempt_ports & (1u << pp->port_num))
-        deipce_preempt_update_link(pp, link_mode != LM_DOWN);
+        deipce_preempt_update_link(pp, link_mode);
 
     return ret;
 }
@@ -855,7 +844,6 @@ static int deipce_port_open(struct net_device *netdev)
         // Allow autoneg.
         np->force_link_mode = LM_DOWN;
         np->link_mode = LM_DOWN;
-        deipce_enable_interface(netdev);
         break;
     case DEIPCE_MEDIUM_SFP:
         // Allow autoneg.
@@ -866,22 +854,22 @@ static int deipce_port_open(struct net_device *netdev)
             // Detect SFP so that adapter can be initialized correctly.
             deipce_set_sfp(pp, deipce_detect_sfp(pp));
         }
-        deipce_enable_interface(netdev);
         break;
     case DEIPCE_MEDIUM_NOPHY:
-        // Try to determine link mode from EMAC (CPU port) or from adapter.
+        // Try to determine link mode from EMAC (CPU port).
         if (pp->flags & DEIPCE_PORT_CPU) {
             if (dp->real_netdev->phydev)
                 np->link_mode =
                     deipce_get_phy_link_mode(dp->real_netdev->phydev);
         }
-        deipce_enable_interface(netdev);
         break;
     case DEIPCE_MEDIUM_NONE:
     default:
         netdev_dbg(netdev, "Port not in use\n");
         return -ENODEV;
     }
+
+    deipce_enable_interface(netdev);
 
     // Capture statistics counters periodically.
     if (dp->features.flags & FLX_FRS_FEAT_STATS) {
@@ -962,7 +950,7 @@ static int deipce_port_close(struct net_device *netdev)
     }
 
     if (dp->features.preempt_ports & (1u << pp->port_num))
-        deipce_preempt_cleanup(pp);
+        deipce_preempt_reset(pp);
     deipce_disable_interface(netdev);
 
     if (pp->medium_type == DEIPCE_MEDIUM_SFP) {
@@ -1162,6 +1150,9 @@ static struct net_device *deipce_add_netdev(struct deipce_dev_priv *dp,
     // We can handle multicast packets.
     netdev->flags |= IFF_MULTICAST;
 
+    // Required to work without qdisc on a preemptable (PREEMPT_RT) kernel.
+    netdev->features |= NETIF_F_LLTX;
+
     ret = register_netdev(netdev);
     if (ret) {
         dev_err(dp->this_dev, "register_netdev failed\n");
@@ -1295,7 +1286,7 @@ int deipce_netdev_init_port(struct deipce_dev_priv *dp,
         deipce_preempt_init(pp);
 
     deipce_set_port_mode(netdev, LM_DOWN);
-    deipce_update_ipo_rules(netdev);
+    deipce_update_ipo_rules(pp);
 
     if (dp->features.flags & FLX_FRS_FEAT_SHAPER)
         deipce_shaper_init(pp);
@@ -1309,8 +1300,7 @@ int deipce_netdev_init_port(struct deipce_dev_priv *dp,
         goto err_port_sysfs;
 
     if (pp->sched.fsc) {
-        ret = deipce_fsc_sysfs_dev_init(pp->sched.fsc, pp->sched.num,
-                                        &pp->netdev->dev);
+        ret = deipce_fsc_sysfs_dev_init(pp->sched.fsc, pp->sched.num, pp);
         if (ret)
             goto err_fsc_sysfs;
     }
@@ -1362,6 +1352,13 @@ void deipce_netdev_cleanup_port(struct deipce_dev_priv *dp,
                                 struct deipce_port_priv *pp)
 {
     dev_dbg(dp->this_dev, "%s()\n", __func__);
+
+    if (pp->sched.fsc)
+        deipce_fsc_sysfs_dev_cleanup(pp->sched.fsc, pp->sched.num, pp);
+
+    deipce_port_sysfs_cleanup(pp);
+    if (dp->features.preempt_ports & (1u << pp->port_num))
+        deipce_preempt_cleanup(pp);
 
     deipce_cleanup_adapter(pp);
     unregister_netdev(pp->netdev);

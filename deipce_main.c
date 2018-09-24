@@ -45,6 +45,7 @@
 #include "deipce_netdev.h"
 #include "deipce_netdevif.h"
 #include "deipce_hw.h"
+#include "deipce_mstp.h"
 #include "deipce_switchdev.h"
 #include "deipce_time.h"
 #include "deipce_clock_main.h"
@@ -52,7 +53,7 @@
 #include "deipce_fpts_main.h"
 #include "deipce_ibc_main.h"
 #include "deipce_mdio_main.h"
-#include "deipce_debugfs.h"
+
 #include "deipce_main.h"
 
 // Module description information
@@ -85,21 +86,6 @@ static struct deipce_drv_priv deipce_drv_priv = {
 struct deipce_drv_priv *deipce_get_drv_priv(void)
 {
     return &deipce_drv_priv;
-}
-
-/**
- * Read switch generic register value.
- * @param dp Switch privates.
- * @param reg Generic register to read.
- * @param mask Bitmask for value.
- * @return Masked generic value.
- */
-static inline uint16_t deipce_read_generic(struct deipce_dev_priv *dp,
-                                           unsigned int reg,
-                                           uint16_t mask)
-{
-    // Generics addresses are already byte addresses.
-    return deipce_read_switch_reg(dp, reg >> 1) & mask;
 }
 
 /**
@@ -141,6 +127,12 @@ static int deipce_read_switch_parameters(struct deipce_dev_priv *dp)
     dp->features.macsec_ports =
         deipce_read_generic(dp, FRS_REG_GENERIC_MACSEC_PORTS,
                             FRS_REG_GENERIC_PORT_MASK);
+
+    dp->features.fids =
+        deipce_read_generic(dp, FRS_REG_GENERIC_FIDS,
+                            FRS_REG_GENERIC_FIDS_MASK);
+    if (dp->features.fids)
+        dp->features.fids = 1u << dp->features.fids;
 
     dp->features.clock_freq =
         deipce_read_generic(dp, FRS_REG_GENERIC_CLK_FREQ,
@@ -228,21 +220,6 @@ static int deipce_sw_reset(struct deipce_dev_priv *dp)
     dev_printk(KERN_DEBUG, dp->this_dev, "SW reset done\n");
 
     return 0;
-}
-
-/**
- * Drop all VLAN memberships.
- * @param dp Switch privates.
- */
-void deipce_drop_all_vlans(struct deipce_dev_priv *dp)
-{
-    unsigned int vlan_id;
-
-    for (vlan_id = 0; vlan_id <= VLAN_VID_MASK; vlan_id++) {
-        deipce_write_switch_reg(dp, FRS_VLAN_CFG(vlan_id), 0);
-    }
-
-    return;
 }
 
 /**
@@ -410,63 +387,6 @@ static int deipce_config_switch_static(struct deipce_dev_priv *dp,
 }
 
 /**
- * Get PHY delays from device tree.
- * @param dp Switch privates.
- * @param pp Port privates.
- * @param node Device tree node with "phy-delay" property.
- */
-static int deipce_of_get_phy_delays(struct deipce_dev_priv *dp,
-                                    struct deipce_port_priv *pp,
-                                    struct device_node *node)
-{
-    // Triplettes of speed, TX-delay and RX-delay.
-    const unsigned int values_per_delay = 3;
-    const unsigned int delay_size = values_per_delay * sizeof(uint32_t);
-    int length = 0;
-    const __be32 *values;
-    unsigned int delay_count;
-    unsigned int value_index = 0;
-    unsigned int speed;
-    enum link_mode link_mode;
-    struct deipce_delay *delay;
-    unsigned int delay_num;
-
-    // Delays are optional.
-    values = of_get_property(node, "phy-delay", &length);
-    if (!values)
-        return 0;
-
-    if (length % delay_size)
-        return -EINVAL;
-
-    delay_count = length / delay_size;
-    for (delay_num = 0; delay_num < delay_count; delay_num++) {
-        speed = be32_to_cpu(values[value_index + 0]);
-        switch (speed) {
-        case 1000: link_mode = LM_1000FULL; break;
-        case 100: link_mode = LM_100FULL; break;
-        case 10: link_mode = LM_10FULL; break;
-        case 0: link_mode = LM_DOWN; break;
-        default:
-            return -EINVAL;
-        }
-
-        delay = &pp->ext_phy.delay[link_mode];
-        delay->tx = be32_to_cpu(values[value_index + 1]);
-        delay->rx = be32_to_cpu(values[value_index + 2]);
-
-        dev_dbg(dp->this_dev, "%s() PHY delays @%u Mbps TX %lu RX %lu\n",
-                __func__, speed, delay->tx, delay->rx);
-
-        value_index += values_per_delay;
-    }
-
-    pp->ext_phy.delay[LM_DOWN] = pp->ext_phy.delay[LM_10FULL];
-
-    return 0;
-}
-
-/**
  * Read additional switch port configuration from device tree.
  * @param dp Switch privates.
  * @param pp Port privates.
@@ -510,13 +430,6 @@ static int deipce_config_port_dt(struct deipce_dev_priv *dp,
         phy_mode = of_get_phy_mode(port_node);
         if (phy_mode >= 0)
             pp->ext_phy.interface = phy_mode;
-    }
-
-    // Ext PHY delays
-    ret = deipce_of_get_phy_delays(dp, pp, port_node);
-    if (ret) {
-        dev_warn(dp->this_dev, "Invalid PHY delays for port %u\n",
-                 pp->port_num);
     }
 
     // SFP EEPROM for SFP type detection
@@ -691,7 +604,6 @@ static int deipce_create_port(struct deipce_dev_priv *dp,
         .medium_type = DEIPCE_MEDIUM_NOPHY,
         .sfp.supported = DEIPCE_ETHTOOL_SUPPORTED,
         .mirror_port = -1,
-        .mgmt_tc = 1,
 
         // Management trailer for sending.
         .trailer = 1u << (dp->trailer_offset + port_num),
@@ -762,6 +674,10 @@ static int deipce_init_port(struct deipce_dev_priv *dp,
 
     deipce_init_port_registers(dp, pp);
 
+    ret = deipce_mstp_init_port(dp, pp);
+    if (ret)
+        goto err_mstp;
+
     ret = deipce_netdev_init_port(dp, pp, &config);
     if (ret)
         goto err_netdev;
@@ -776,6 +692,9 @@ err_switchdev:
     deipce_netdev_cleanup_port(dp, pp);
 
 err_netdev:
+    deipce_mstp_cleanup_port(dp, pp);
+
+err_mstp:
 err_config:
     return ret;
 }
@@ -789,6 +708,7 @@ static void deipce_cleanup_port(struct deipce_dev_priv *dp,
                                 struct deipce_port_priv *pp)
 {
     deipce_netdev_cleanup_port(dp, pp);
+    deipce_mstp_cleanup_port(dp, pp);
 
     return;
 }
@@ -869,6 +789,7 @@ static int deipce_create_switch(struct platform_device *pdev)
     *dp = (struct deipce_dev_priv) {
         .this_dev = &pdev->dev,
         .dev_num = dev_num,
+        .mgmt_tc = 1,
         .tstamp_cfg = {
             .tx_type = HWTSTAMP_TX_OFF,
             .rx_filter = HWTSTAMP_FILTER_PTP_V2_L4_EVENT,
@@ -1033,6 +954,14 @@ static int deipce_init_switch(struct deipce_dev_priv *dp)
 
     deipce_init_switch_registers(dp);
 
+    ret = deipce_init_vlan_fids(dp);
+    if (ret)
+        goto err_fid;
+
+    ret = deipce_mstp_init_switch(dp);
+    if (ret)
+        goto err_mstp;
+
     ret = deipce_switchdev_init_switch(dp);
     if (ret)
         goto err_switchdev;
@@ -1065,14 +994,7 @@ static int deipce_init_switch(struct deipce_dev_priv *dp)
 
     deipce_irq_enable(dp);
 
-    ret = deipce_debugfs_init_device(dp);
-    if (ret)
-        goto err_debugfs;
-
     return 0;
-
-err_debugfs:
-    deipce_netdev_cleanup_switch(dp);
 
 err_netdev:
 err_port:
@@ -1086,6 +1008,12 @@ err_port:
     deipce_switchdev_cleanup_switch(dp);
 
 err_switchdev:
+    deipce_mstp_cleanup_switch(dp);
+
+err_mstp:
+    deipce_cleanup_vlan_fids(dp);
+
+err_fid:
 err_config_switch_dt:
     return ret;
 }
@@ -1101,8 +1029,6 @@ static void deipce_cleanup_switch(struct deipce_dev_priv *dp)
 
     dev_dbg(dp->this_dev, "%s()\n", __func__);
 
-    deipce_debugfs_cleanup_device(dp);
-
     deipce_irq_disable(dp);
 
     for (port_num = 0; port_num < ARRAY_SIZE(dp->port); port_num++) {
@@ -1113,6 +1039,7 @@ static void deipce_cleanup_switch(struct deipce_dev_priv *dp)
 
     deipce_netdev_cleanup_switch(dp);
     deipce_switchdev_cleanup_switch(dp);
+    deipce_mstp_cleanup_switch(dp);
 
     dev_dbg(dp->this_dev, "%s() done\n", __func__);
 
@@ -1143,6 +1070,8 @@ static void deipce_destroy_switch(struct deipce_dev_priv *dp)
         kfree(dp->smac.used);
         dp->smac.used = NULL;
     }
+
+    deipce_cleanup_vlan_fids(dp);
 
     iounmap(dp->ioaddr);
     dp->ioaddr = NULL;
@@ -1268,10 +1197,6 @@ static int __init deipce_init(void)
     struct deipce_drv_priv *drv = deipce_get_drv_priv();
     int ret = 0;
 
-    ret = deipce_debugfs_init_driver(drv);
-    if (ret)
-        goto err_init_debugfs;
-
     deipce_time_init_driver();
 
     /*
@@ -1361,9 +1286,6 @@ err_workqueue_lowpri:
     deipce_cleanup_crc40(drv);
 
 err_init_crc40:
-    deipce_debugfs_cleanup_driver(drv);
-
-err_init_debugfs:
     return ret;
 }
 
@@ -1393,8 +1315,6 @@ static void __exit deipce_cleanup(void)
     deipce_fsc_cleanup_driver();
     deipce_clock_cleanup_driver();
     deipce_fpts_cleanup_driver();
-
-    deipce_debugfs_cleanup_driver(drv);
 
     pr_debug(DRV_NAME ": %s() done\n", __func__);
 

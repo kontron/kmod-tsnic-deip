@@ -39,6 +39,11 @@
 #define DEIPCE_FSC_MAX_TABLES      2
 #define DEIPCE_FSC_MAX_ROWS        1024
 
+// Gate operations
+#define DEIPCE_FSC_OP_SET_GATES         0x00    ///< set gates
+#define DEIPCE_FSC_OP_HOLD_MAC          0x01    ///< set gates and hold
+#define DEIPCE_FSC_OP_RELEASE_MAC       0x02    ///< set gates and release
+
 struct ptp_clock_info;
 
 /**
@@ -64,6 +69,7 @@ struct deipce_fsc_time {
 struct deipce_fsc_table {
     unsigned int num;                   ///< table number
     unsigned int num_rows_used;         ///< number of rows in use
+    uint8_t *gate_op;                   ///< gate operations of entries
 };
 
 /**
@@ -90,6 +96,8 @@ struct deipce_fsc_sched_param_ctx {
  */
 struct deipce_fsc_sched {
     unsigned int num;                   ///< scheduler number
+    uint64_t hold_output_mask;          ///< bitmask of hold output,
+                                        ///< zero if preemption not supported
     unsigned int table_num;             ///< current schedule table number
                                         ///< (administrative)
     bool config_change;                 ///< schedule change in progress
@@ -116,7 +124,8 @@ struct deipce_fsc_dev_priv {
     unsigned int num_sched;             ///< number of schedulers
     unsigned int num_outputs;           ///< number of outputs
     unsigned int num_rows;              ///< number of scheduler table rows
-    uint64_t output_mask;               ///< bitmask of valid output bits
+    uint64_t output_mask;               ///< bitmask of valid output bits,
+                                        ///< including possible hold output
     uint64_t hold_output_mask;          ///< bitmask of hold output
 
     struct mutex lock;                  ///< synchronize access to registers

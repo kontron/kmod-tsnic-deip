@@ -217,12 +217,12 @@ static bool deipce_match_reserved(const uint8_t *address)
 /**
  * Get prioritization for incoming management traffic.
  * RTNL lock must be held when calling this.
- * @param pp Port privates.
+ * @param dp Switch privates.
  * @return Traffic class.
  */
-unsigned int deipce_get_mgmt_tc(struct deipce_port_priv *pp)
+unsigned int deipce_get_mgmt_tc(struct deipce_dev_priv *dp)
 {
-    return pp->mgmt_tc;
+    return dp->mgmt_tc;
 }
 
 /**
@@ -231,16 +231,26 @@ unsigned int deipce_get_mgmt_tc(struct deipce_port_priv *pp)
  * @param pp Port privates.
  * @param tc traffic class.
  */
-int deipce_set_mgmt_tc(struct deipce_port_priv *pp, unsigned int tc)
+int deipce_set_mgmt_tc(struct deipce_dev_priv *dp, unsigned int tc)
 {
-    struct deipce_dev_priv *dp = pp->dp;
+    struct deipce_port_priv *pp;
+    unsigned int port_num;
     int ret;
 
     if (tc >= dp->features.prio_queues)
         return -EINVAL;
 
-    pp->mgmt_tc = tc;
-    ret = deipce_update_ipo_rules(pp->netdev);
+    dp->mgmt_tc = tc;
+
+    for (port_num = 0; port_num < dp->num_of_ports; port_num++) {
+        pp = dp->port[port_num];
+        if (!pp)
+            continue;
+
+        ret = deipce_update_ipo_rules(pp);
+        if (ret)
+            break;
+    }
 
     return ret;
 }
@@ -272,7 +282,7 @@ int deipce_set_mirror_port(struct deipce_port_priv *pp, int mirror_port)
         pp->mirror_port = mirror_port;
     else
         pp->mirror_port = -1;
-    ret = deipce_update_ipo_rules(pp->netdev);
+    ret = deipce_update_ipo_rules(pp);
 
     return ret;
 }
@@ -280,13 +290,11 @@ int deipce_set_mirror_port(struct deipce_port_priv *pp, int mirror_port)
 /**
  * Deal with automatically handled IPO rules.
  * RTNL lock must be held when calling this.
- * @param netdev FRS port netdevice
+ * @param pp Port privates.
  */
-int deipce_update_ipo_rules(struct net_device *netdev)
+int deipce_update_ipo_rules(struct deipce_port_priv *pp)
 {
-    struct deipce_netdev_priv *np = netdev_priv(netdev);
-    struct deipce_port_priv *pp = np->pp;
-    struct deipce_dev_priv *dp = np->dp;
+    struct deipce_dev_priv *dp = pp->dp;
     unsigned int entry = 0;
     unsigned int i = 0;
     const struct deipce_ipo *ipodata = NULL;
@@ -297,16 +305,16 @@ int deipce_update_ipo_rules(struct net_device *netdev)
     int ret = -EIO;
     uint16_t mgmt_prio;
 
-    netdev_dbg(netdev, "%s()\n", __func__);
+    netdev_dbg(pp->netdev, "%s()\n", __func__);
 
     if (pp->mirror_port >= 0)
         mirror_all = 1u << pp->mirror_port;
 
     // In case of 4 queues, map classes (0-3) <--> queues (0,2,4,6) in IP.
     if (dp->features.prio_queues == 4)
-        mgmt_prio = PORT_ETH_ADDR_FROM_PRIO(pp->mgmt_tc << 1);
+        mgmt_prio = PORT_ETH_ADDR_FROM_PRIO(dp->mgmt_tc << 1);
     else
-        mgmt_prio = PORT_ETH_ADDR_FROM_PRIO(pp->mgmt_tc);
+        mgmt_prio = PORT_ETH_ADDR_FROM_PRIO(dp->mgmt_tc);
 
     if (pp->flags & DEIPCE_PORT_CPU) {
         // Allow forwarding reserved traffic to all ports.
@@ -357,7 +365,7 @@ int deipce_update_ipo_rules(struct net_device *netdev)
             return ret;
     }
 
-    netdev_dbg(netdev, "%s() done\n", __func__);
+    netdev_dbg(pp->netdev, "%s() done\n", __func__);
 
     return 0;
 }

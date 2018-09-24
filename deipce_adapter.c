@@ -773,13 +773,14 @@ enum link_mode deipce_best_adapter_link_mode(struct deipce_port_priv *pp)
 void deipce_get_adapter_delays(struct deipce_port_priv *pp,
                                struct deipce_delay *delay)
 {
-    if (pp->adapter.ioaddr) {
+    struct deipce_netdev_priv *np = netdev_priv(pp->netdev);
+
+    if (pp->adapter.ioaddr && !(pp->flags & DEIPCE_ADAPTER_DELAY_OVERRIDE)) {
         delay->tx = deipce_read_adapter_reg(pp, ADAPTER_REG_TX_DELAY);
         delay->rx = deipce_read_adapter_reg(pp, ADAPTER_REG_RX_DELAY);
     }
     else {
-        delay->tx = 0;
-        delay->rx = 0;
+        *delay = pp->adapter.delay[np->link_mode];
     }
 
     return;

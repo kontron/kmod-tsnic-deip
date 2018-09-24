@@ -40,9 +40,9 @@ int deipce_irq_init(struct deipce_dev_priv *dp);
 void deipce_irq_enable(struct deipce_dev_priv *dp);
 void deipce_irq_disable(struct deipce_dev_priv *dp);
 void deipce_irq_cleanup(struct deipce_dev_priv *dp);
-int deipce_update_ipo_rules(struct net_device *netdev);
-unsigned int deipce_get_mgmt_tc(struct deipce_port_priv *pp);
-int deipce_set_mgmt_tc(struct deipce_port_priv *pp, unsigned int tc);
+int deipce_update_ipo_rules(struct deipce_port_priv *pp);
+unsigned int deipce_get_mgmt_tc(struct deipce_dev_priv *dp);
+int deipce_set_mgmt_tc(struct deipce_dev_priv *dp, unsigned int tc);
 int deipce_get_mirror_port(struct deipce_port_priv *pp);
 int deipce_set_mirror_port(struct deipce_port_priv *pp, int mirror_port);
 

@@ -5,7 +5,7 @@
 
    DE-IP Core Edge Linux driver
 
-   Copyright (C) 2017 Flexibilis Oy
+   Copyright (C) 2018 Flexibilis Oy
 
    This program is free software; you can redistribute it and/or modify it
    under the terms of the GNU General Public License version 2
@@ -21,24 +21,30 @@
 
 */
 
-#ifndef DEIPCE_PORT_SYSFS_H
-#define DEIPCE_PORT_SYSFS_H
+#ifndef DEIPCE_MSTP_SYSFS_H
+#define DEIPCE_MSTP_SYSFS_H
 
-#include "deipce_types.h"
+struct deipce_dev_priv;
+struct deipce_port_priv;
 
 #if IS_ENABLED(CONFIG_SYSFS)
+#if IS_ENABLED(CONFIG_NET_SWITCHDEV)
 
-int deipce_port_sysfs_init(struct deipce_port_priv *pp);
-void deipce_port_sysfs_cleanup(struct deipce_port_priv *pp);
+int deipce_mstp_sysfs_init_switch(struct deipce_dev_priv *dp);
+void deipce_mstp_sysfs_cleanup_switch(struct deipce_dev_priv *dp);
+
+int deipce_mstp_sysfs_init_port(struct deipce_port_priv *dp);
+void deipce_mstp_sysfs_cleanup_port(struct deipce_port_priv *dp);
 
 #else
 
-static inline int deipce_port_sysfs_init(struct deipce_port_priv *pp)
+static inline int deipce_mstp_sysfs_init_port(struct deipce_port_priv *dp)
 { return 0; }
 
-static inline void deipce_port_sysfs_cleanup(struct deipce_port_priv *pp)
+static inline void deipce_mstp_sysfs_cleanup_port(struct deipce_port_priv *dp)
 { return; }
 
-#endif
+#endif // CONFIG_NET_SWITCHDEV
+#endif // CONFIG_SYSFS
 
 #endif

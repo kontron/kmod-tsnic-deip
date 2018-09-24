@@ -38,6 +38,7 @@
 #include "deipce_fsc_types.h"
 #include "deipce_fsc_hw.h"
 #include "deipce_fsc_if.h"
+#include "deipce_fsc_main.h"
 
 // Driver private data
 static struct deipce_fsc_drv_priv deipce_fsc_drv_priv;
@@ -166,7 +167,6 @@ static int deipce_fsc_init_sched(struct deipce_fsc_dev_priv *dp,
                                  struct deipce_fsc_sched *sched)
 {
     unsigned int table_num;
-    unsigned int row;
     uint16_t dc_speed;
     uint16_t table_gen;
     int ret;
@@ -190,11 +190,9 @@ static int deipce_fsc_init_sched(struct deipce_fsc_dev_priv *dp,
         if (table_gen & FSC_SCHED_TBL_GEN_IN_USE)
             continue;
 
-        for (row = 0; row < dp->num_rows; row++) {
-            ret = deipce_fsc_write_row(dp, sched->num, table_num, row, 0, 0);
-            if (ret)
-                return ret;
-        }
+        ret = deipce_fsc_clear_rows(dp, sched->num, table_num);
+        if (ret)
+            return ret;
     }
 
     dev_dbg(&dp->pdev->dev,
@@ -303,6 +301,12 @@ static int deipce_fsc_device_init(struct platform_device *pdev)
             table = &sched->table[table_num];
             table->num = table_num;
 
+            table->gate_op = kzalloc(dp->num_rows, GFP_KERNEL);
+            if (!table->gate_op) {
+                ret = -ENOMEM;
+                goto err_alloc_gate_op;
+            }
+
             table_gen = deipce_fsc_read16(dp,
                                           FSC_SCHED_TBL_BASE(sched->num,
                                                              sched->table_num) +
@@ -326,6 +330,19 @@ static int deipce_fsc_device_init(struct platform_device *pdev)
     return 0;
 
 err_sched_init:
+err_alloc_gate_op:
+    for (sched_num = 0; sched_num < dp->num_sched; sched_num++) {
+        sched = &dp->sched[sched_num];
+
+        for (table_num = 0; table_num < DEIPCE_FSC_MAX_TABLES; table_num++) {
+            table = &sched->table[table_num];
+            if (table->gate_op) {
+                kfree(table->gate_op);
+                table->gate_op = NULL;
+            }
+        }
+    }
+
 err_config:
     iounmap(dp->ioaddr);
     dp->ioaddr = NULL;
@@ -343,7 +360,22 @@ err_ioremap:
  */
 static void deipce_fsc_device_cleanup(struct deipce_fsc_dev_priv *dp)
 {
+    struct deipce_fsc_sched *sched;
+    struct deipce_fsc_table *table;
+    unsigned int sched_num;
+    unsigned int table_num;
+
     dev_dbg(&dp->pdev->dev, "Cleanup device\n");
+
+    for (sched_num = 0; sched_num < dp->num_sched; sched_num++) {
+        sched = &dp->sched[sched_num];
+
+        for (table_num = 0; table_num < DEIPCE_FSC_MAX_TABLES; table_num++) {
+            table = &sched->table[table_num];
+            kfree(table->gate_op);
+            table->gate_op = NULL;
+        }
+    }
 
     iounmap(dp->ioaddr);
     dp->ioaddr = NULL;

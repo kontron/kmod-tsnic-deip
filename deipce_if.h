@@ -83,9 +83,32 @@
 #define FRS_REG_GENERIC_MACSEC_PORTS    (FRS_REG_GENERIC + 0x01e)
 #define FRS_REG_GENERIC_MACSEC_CIPHER   (FRS_REG_GENERIC + 0x020)
 #define FRS_REG_GENERIC_MGMT_PORTS      (FRS_REG_GENERIC + 0x022)
+#define FRS_REG_GENERIC_FIDS            (FRS_REG_GENERIC + 0x02a)
+#define FRS_REG_GENERIC_FIDS_MASK       0x003f
 #define FRS_REG_GENERIC_CLK_FREQ        (FRS_REG_GENERIC + 0x100)
 #define FRS_REG_GENERIC_CLK_FREQ_MASK   0xff
 #define FRS_REG_GENERIC_DEBUG_IN        (FRS_REG_GENERIC + 0x110)
+#define FRS_REG_GENERIC_HOLD_ADV_10     (FRS_REG_GENERIC + 0x200)
+#define FRS_REG_GENERIC_HOLD_ADV_100    (FRS_REG_GENERIC + 0x202)
+#define FRS_REG_GENERIC_HOLD_ADV_1000   (FRS_REG_GENERIC + 0x204)
+#define FRS_REG_GENERIC_REL_ADV_10      (FRS_REG_GENERIC + 0x208)
+#define FRS_REG_GENERIC_REL_ADV_100     (FRS_REG_GENERIC + 0x20a)
+#define FRS_REG_GENERIC_REL_ADV_1000    (FRS_REG_GENERIC + 0x20c)
+#define FRS_REG_GENERIC_I_TO_G_MIN_10   (FRS_REG_GENERIC + 0x210)
+#define FRS_REG_GENERIC_I_TO_G_MIN_100  (FRS_REG_GENERIC + 0x212)
+#define FRS_REG_GENERIC_I_TO_G_MIN_1000 (FRS_REG_GENERIC + 0x214)
+#define FRS_REG_GENERIC_I_TO_G_MAX_10   (FRS_REG_GENERIC + 0x218)
+#define FRS_REG_GENERIC_I_TO_G_MAX_100  (FRS_REG_GENERIC + 0x21a)
+#define FRS_REG_GENERIC_I_TO_G_MAX_1000 (FRS_REG_GENERIC + 0x21c)
+#define FRS_REG_GENERIC_G_TO_O_MIN_10   (FRS_REG_GENERIC + 0x220)
+#define FRS_REG_GENERIC_G_TO_O_MIN_100  (FRS_REG_GENERIC + 0x222)
+#define FRS_REG_GENERIC_G_TO_O_MIN_1000 (FRS_REG_GENERIC + 0x224)
+#define FRS_REG_GENERIC_G_TO_O_MAX_10   (FRS_REG_GENERIC + 0x228)
+#define FRS_REG_GENERIC_G_TO_O_MAX_100  (FRS_REG_GENERIC + 0x22a)
+#define FRS_REG_GENERIC_G_TO_O_MAX_1000 (FRS_REG_GENERIC + 0x22c)
+#define FRS_REG_GENERIC_DELAY_CLK_MASK  0xf
+#define FRS_REG_GENERIC_DELAY_MII_MASK  0xf
+#define FRS_REG_GENERIC_DELAY_MII_SHIFT 8
 
 #define FRS_REG_GENERIC_BOOL_MASK       0x1
 #define FRS_REG_GENERIC_PORT_MASK       0xfff
@@ -100,6 +123,7 @@
 #define FRS_REG_BODY_SVN_ID         0x0004      ///< FRS register
 #define FRS_REG_GEN                 0x0008      ///< FRS GENERAL register
 #define FRS_REG_MAC_TABLE_CLEAR_MASK    0x0009  ///< FRS MAC table clear mask
+#define FRS_REG_MAC_TABLE_CLEAR_FID 0x000a      ///< FRS MAC table clear FID
 //#define FRS_REG_CMEM_FILL_LEVEL     0x000A
 #define FRS_REG_DMEM_FILL_LEVEL     0x000B
 #define FRS_REG_SEQ_MEM_FILL_LEVEL  0x000C
@@ -111,7 +135,6 @@
 #define FRS_REG_TS_CTRL_RX          0x0015      ///< Frame timestamp control, RX
 #define FRS_REG_INTMASK             0x0016
 #define FRS_REG_INTSTAT             0x0017
-#define FRS_REG_MAC_TABLE(n)        (0x100 + (n))       ///< n = 0 .. 3
 
 #define FRS_AGING_MASK              0x007f      ///< bitmask for ageing time
 
@@ -205,16 +228,18 @@
 /**
  * FRS MAC table registers
  */
+#define FRS_REG_MAC_TABLE(n)        (0x100 + (n))       ///< n = 0 .. 4
 #define FRS_MAC_TABLE0_PORT_MASK    0xf         ///< Port number mask
 #define FRS_MAC_TABLE0_TRANSFER     (1u << 15)  ///< Transfer next addr
+#define FRS_MAC_TABLE4_FID_MASK     FRS_REG_GENERIC_FIDS_MASK
 
 /**
  * VLAN Configuration registers.
  */
 #define FRS_VLAN_BASE               0x4000
 #define FRS_VLAN_CFG(id)            (FRS_VLAN_BASE + (id))
-#define FRS_VLAN_DISABLE(port,data) ((data) &= ~(1u << (port)))
-#define FRS_VLAN_ENABLE(port,data)  ((data) |= (1u << (port)))
+#define FRS_VLAN_TAG(id)            (FRS_VLAN_BASE + 0x1000 + (id))
+#define FRS_VLAN_FID(id)            (FRS_VLAN_BASE + 0x2000 + (id))
 
 /**
  * FRS Port Configuration Registers: General.
@@ -225,12 +250,16 @@
 #define PORT_REG_FWD_PORT_MASK    0x000A        ///< Forward port mask
 #define PORT_REG_VLAN_PRIO        0x000B        ///< VLAN priority mapping
 #define PORT_REG_VLAN_PRIO_HI     0x000C        ///< VLAN priority mapping, high bits in DS
+#define PORT_REG_FID_CFG(n)       (0x0040 + (n) / 8)    ///< Port forwarding state for FID n
+#define PORT_FID_CFG_SHIFT(n)     (((n) % 8) * 2)       ///< Bit shift for forwarding state
 
 /// FRS Port Configuration Register bits, PORT_STATE.
 // Bits 1-0, Port State
 #define PORT_STATE_FORWARDING         0x0000    ///< port forwarding
 #define PORT_STATE_LEARNING           0x0001    ///< port learning
 #define PORT_STATE_DISABLED           0x0002    ///< port disabled
+#define PORT_FID_CFG_NO_OVERRIDE      0x0003    ///< port forwarding state for FID,
+                                                ///< do not override port forwarding state
 #define PORT_STATE_STATE_MASK         0x0003    ///< port state mask
 // Bits 3-2, port management status
 #define PORT_STATE_NORMAL_MODE        0x0000    ///< normal mode port

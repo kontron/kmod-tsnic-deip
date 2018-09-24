@@ -288,33 +288,73 @@ int deipce_fsc_clear_rows(struct deipce_fsc_dev_priv *dp,
     }
 
     table->num_rows_used = 0;
+    memset(table->gate_op, 0, dp->num_rows);
 
     return 0;
 }
 
 /**
- * Calculate total time of all rows in schedule time.
+ * Make final adjustments to schedule before starting it.
  * @param dp Device privates.
  * @param sched_num Scheduler number.
  * @param table_num Scheduler table number.
  * @param total_time Place for calculated total time.
  */
-static int deipce_fsc_calc_row_time_sum(struct deipce_fsc_dev_priv *dp,
-                                        unsigned int sched_num,
-                                        unsigned int table_num,
-                                        struct deipce_fsc_time *total_time)
+static int deipce_fsc_fix_table(struct deipce_fsc_dev_priv *dp,
+                                unsigned int sched_num,
+                                unsigned int table_num)
 {
     struct deipce_fsc_sched *sched = &dp->sched[sched_num];
     struct deipce_fsc_table *table = &sched->table[table_num];
+    struct deipce_fsc_sched_param *param = &sched->admin.param;
+    struct deipce_fsc_time total_time = { .sec = 0 };
     uint16_t cycles = 0;
     uint64_t outputs = 0;
+    uint64_t hold_wrap_adjusted_outputs = 0;
+    uint64_t hold_wrap_outputs = 0;
     unsigned int row_num;
+    unsigned int first_hold_row_num = dp->num_rows;
     int ret;
 
-    total_time->sec = 0;
-    total_time->nsec = 0;
-    total_time->subnsec = 0;
+    if (table->num_rows_used > 0) {
+        /*
+         * Record hold signal from end of schedule for implementing hold wrap.
+         * See below.
+         */
+        ret = deipce_fsc_read_row(dp, sched->num, table_num,
+                                  table->num_rows_used - 1,
+                                  &cycles, &outputs);
+        if (ret)
+            return ret;
 
+        hold_wrap_outputs = outputs & sched->hold_output_mask;
+
+        /**
+         * Append row with zero time, but retaining outputs.
+         * This makes scheduler stop on that row until next cycle,
+         * in case of clock jumps or with inaccuracies (prevents glitches).
+         */
+        dev_dbg(&dp->pdev->dev,
+                "%s() Scheduler %u table %u append row %u "
+                "interval %u outputs 0x%llx\n",
+                __func__, sched->num, table->num, table->num_rows_used,
+                0, outputs);
+
+        ret = deipce_fsc_write_row(dp, sched->num, table->num,
+                                   table->num_rows_used, 0, outputs);
+        if (ret)
+            return ret;
+    }
+
+    /*
+     * Non-standard behavior: in case requested cycle time is longer than
+     * supported, use the total length of the schedule as cycle time.
+     * FLEXDE-668.
+     *
+     * In case hold wraps around the end of cycle, adjust rows before first
+     * explicit hold from user to use hold at the end of schedule.
+     * Assume cycle time is long enough for last row to be reached always.
+     */
     for (row_num = 0; row_num < table->num_rows_used; row_num++) {
         ret = deipce_fsc_read_row(dp, sched_num, table_num, row_num,
                                   &cycles, &outputs);
@@ -322,7 +362,44 @@ static int deipce_fsc_calc_row_time_sum(struct deipce_fsc_dev_priv *dp,
             return ret;
 
         // Total time cannot exceed 1 s.
-        total_time->nsec += cycles * dp->clock_cycle_length;
+        total_time.nsec += cycles * dp->clock_cycle_length;
+
+        // Implement hold wrap if necessary.
+        if (hold_wrap_outputs == 0)
+            continue;
+
+        // Stop hold wrap on first explicit hold from user.
+        if (first_hold_row_num < row_num) {
+            continue;
+        }
+        else if (table->gate_op[row_num] == DEIPCE_FSC_OP_HOLD_MAC ||
+                 table->gate_op[row_num] == DEIPCE_FSC_OP_RELEASE_MAC) {
+            first_hold_row_num = row_num;
+            continue;
+        }
+
+        hold_wrap_adjusted_outputs =
+            (outputs & ~sched->hold_output_mask) |
+            hold_wrap_outputs;
+        if (hold_wrap_adjusted_outputs != outputs) {
+            dev_dbg(&dp->pdev->dev,
+                    "%s() scheduler %u row %u/%u outputs 0x%llx hold wrap\n",
+                    __func__, sched->num, row_num, table->num_rows_used,
+                    hold_wrap_adjusted_outputs);
+
+            ret = deipce_fsc_write_row(dp, sched_num, table_num, row_num,
+                                       cycles, hold_wrap_adjusted_outputs);
+            if (ret)
+                return ret;
+        }
+    }
+
+    if (param->cycle_time_fsc.sec > 0) {
+        param->cycle_time_fsc = total_time;
+        param->cycle_time_overflow = true;
+    }
+    else {
+        param->cycle_time_overflow = false;
     }
 
     return 0;
@@ -531,43 +608,6 @@ int deipce_fsc_calc_start_time(struct deipce_fsc_dev_priv *dp,
 }
 
 /**
- * Append row with zero time, but retaining outputs.
- * This makes scheduler stop on that row until next cycle,
- * in case of clock jumps or with inaccuracies (prevents glitches).
- * @param dp Device privates.
- * @param sched Scheduler whose administrative table to fix.
- */
-static int deipce_fsc_fix_last_row(struct deipce_fsc_dev_priv *dp,
-                                   struct deipce_fsc_sched *sched)
-{
-    struct deipce_fsc_table *table = &sched->table[sched->table_num];
-    uint16_t cycles;
-    uint64_t outputs;
-    int ret;
-
-    if (table->num_rows_used == 0)
-        return 0;
-
-    ret = deipce_fsc_read_row(dp, sched->num, table->num,
-                              table->num_rows_used - 1, &cycles, &outputs);
-    if (ret)
-        return ret;
-
-    dev_dbg(&dp->pdev->dev,
-            "%s() Scheduler %u table %u append row %u "
-            "interval %u outputs 0x%llx\n",
-            __func__, sched->num, table->num, table->num_rows_used,
-            0, outputs);
-
-    ret = deipce_fsc_write_row(dp, sched->num, table->num,
-                               table->num_rows_used, 0, outputs);
-    if (ret)
-        return ret;
-
-    return ret;
-}
-
-/**
  * Start new schedule.
  * Alternates between the two schedule tables.
  * Schedule table rows must have been written already.
@@ -592,25 +632,14 @@ static int deipce_fsc_start_schedule(struct deipce_fsc_dev_priv *dp,
     dev_dbg(&dp->pdev->dev, "%s() Switch scheduler %u to table %u\n",
             __func__, sched->num, sched->table_num);
 
-    sched->config_change = true;
+    if (!sched->config_change) {
+        deipce_fsc_split_fraction(&param->cycle_time, cycle_time_fsc);
 
-    deipce_fsc_split_fraction(&param->cycle_time, cycle_time_fsc);
-
-    /*
-     * Non-standard behavior: in case requested cycle time is longer than
-     * supported, use the total length of the schedule as cycle time.
-     * FLEXDE-668.
-     */
-    if (cycle_time_fsc->sec > 0) {
-        ret = deipce_fsc_calc_row_time_sum(dp, sched->num, sched->table_num,
-                                           cycle_time_fsc);
+        ret = deipce_fsc_fix_table(dp, sched->num, sched->table_num);
         if (ret)
             return ret;
 
-        param->cycle_time_overflow = true;
-    }
-    else {
-        param->cycle_time_overflow = false;
+        sched->config_change = true;
     }
 
     ctrl = deipce_fsc_read16(dp, FSC_SCHED_BASE(sched->num) +
@@ -685,10 +714,6 @@ static int deipce_fsc_start_schedule(struct deipce_fsc_dev_priv *dp,
     table_gen = deipce_fsc_read16(dp, FSC_SCHED_TBL_BASE(sched->num,
                                                          sched->table_num) +
                                   FSC_SCHED_TBL_GEN);
-
-    ret = deipce_fsc_fix_last_row(dp, sched);
-    if (ret)
-        return ret;
 
     table_gen |= FSC_SCHED_TBL_GEN_CAN_USE;
     table_gen &= ~FSC_SCHED_TBL_GEN_STOP_AT_LAST;
@@ -847,6 +872,7 @@ static int deipce_fsc_copy_schedule_table(struct deipce_fsc_dev_priv *dp,
     }
 
     dst_table->num_rows_used = src_table->num_rows_used;
+    memcpy(dst_table->gate_op, src_table->gate_op, dst_table->num_rows_used);
 
     return 0;
 }
